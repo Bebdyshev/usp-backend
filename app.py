@@ -11,11 +11,17 @@ import pandas as pd
 import requests
 from io import BytesIO, StringIO
 import json
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = FastAPI()
 
-init_db()
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
+AZURE_API_KEY = os.getenv("AZURE_API_KEY")
 
+init_db()
 
 app.add_middleware(
     CORSMiddleware,
@@ -68,6 +74,18 @@ def delete_all_users(db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback() 
         raise HTTPException(status_code=500, detail=str(e))
+    
+@app.get("/users/me")
+def get_me(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    payload = verify_access_token(token)
+    if payload is None:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    user_email = payload.get("sub")
+    user = db.query(UserInDB).filter(UserInDB.email == user_email).first()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
 
 @app.post("/send/")
 async def send_excel_as_csv_to_openai(grade: str = Form(...), curator: str = Form(...), file: UploadFile = File(...), token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
@@ -134,8 +152,10 @@ async def send_excel_as_csv_to_openai(grade: str = Form(...), curator: str = For
                 db_student.danger_level = danger_level
             else:
                 db_grade = db.query(GradeInDB).filter(GradeInDB.grade == grade, GradeInDB.curatorName == curator).first()
+
+                user_id = db.query(UserInDB).filter(UserInDB.email == user_data["sub"]).first().id
                 if not db_grade:
-                    db_grade = GradeInDB(grade=grade, curatorName=curator)
+                    db_grade = GradeInDB(grade=grade, curatorName=curator, user_id=user_id)
                     db.add(db_grade)
                     db.commit()
                     db.refresh(db_grade)
@@ -145,6 +165,7 @@ async def send_excel_as_csv_to_openai(grade: str = Form(...), curator: str = For
                     actual_score=analysis_item["score"],
                     teacher_score=analysis_item["teacher_score"],
                     danger_level=danger_level,  
+                    delta_percentage= round(percentage_difference, 2),
                     grade_id=db_grade.id  
                 )
                 db.add(new_student)
@@ -156,28 +177,49 @@ async def send_excel_as_csv_to_openai(grade: str = Form(...), curator: str = For
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
-@app.post("/get_class")
-def get_class_data(grade: str = Form(...), db: Session = Depends(get_db)):
+@app.get("/get_class")
+def get_class_data(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     try:
-        # Fetching the grade and associated students from the database
-        db_grade = db.query(GradeInDB).filter(GradeInDB.grade == grade).first()
+        # Verify the token and get user data
+        user_data = verify_access_token(token)  
+        if not user_data:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
         
-        if not db_grade:
-            raise HTTPException(status_code=404, detail="Grade not found")
+        # Get user by email (sub)
+        user = db.query(UserInDB).filter(UserInDB.email == user_data["sub"]).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
 
-        students = db.query(StudentInDB).filter(StudentInDB.grade_id == db_grade.id).all()
+        db_grades = db.query(GradeInDB).filter(GradeInDB.user_id == user.id).all()
         
-        # Prepare the class data response
+        if not db_grades:
+            raise HTTPException(status_code=404, detail="No grades found for the user")
+
         class_data = []
-        for student in students:
+        
+        for grade in db_grades:
+            students = db.query(StudentInDB).filter(StudentInDB.grade_id == grade.id).all()
+            student_info_list = []
+            
+            for student in students:
+                student_info_list.append({
+                    "student_name": student.name,
+                    "actual_score": student.actual_score,
+                    "teacher_score": student.teacher_score,
+                    "danger_level": student.danger_level,
+                    "delta_percentage": student.delta_percentage,
+                    "class_liter": grade.grade,
+                })
+                
             class_data.append({
-                "student_name": student.name,
-                "actual_score": student.actual_score,
-                "teacher_score": student.teacher_score,
-                "danger_level": student.danger_level,
+                "curator_name": grade.curatorName,
+                "grade_liter": grade.grade,
+                "class": student_info_list
             })
         
         return {"class_data": class_data}
 
+    except HTTPException as e:
+        raise e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="An error occurred while fetching class data")

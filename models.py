@@ -45,6 +45,7 @@ class StudentInDB(Base):
     actual_score = Column(Float, index=True)
     teacher_score = Column(Float, index=True)
     danger_level = Column(Integer, index=True)
+    delta_percentage = Column(Float, index=True)
     
     # Внешний ключ для связи с оценками
     grade_id = Column(Integer, ForeignKey("grades.id"))
@@ -67,7 +68,7 @@ class CreateStudent(BaseModel):
     teacher_score: float
     predicted_score: float
     danger_level: int
-
+    delta_percentage: float
 # Модель для входа пользователя
 class UserLogin(BaseModel):
     email: str
