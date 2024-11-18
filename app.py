@@ -33,6 +33,38 @@ app.add_middleware(
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
+def analyze_excel(csv_text):
+    headers = {
+            "Content-Type": "application/json",
+            "api-key": AZURE_API_KEY
+    }
+    data = {
+        "messages": [
+            {
+                "role": "system", 
+                "content": "You are an assistant that processes CSV data and provides insights."
+            },
+            {
+                "role": "user",
+                "content": f"Here's the CSV data:\n{csv_text}\nYou should provide feedback in JSON format like this: \n[{{'student_name': 'student_name', 'actual_score': [1score, 2score, 3score, 4score, total_score], 'predicted_score': [1score, 2score, 3score, 4score, total_score]}}]\n. PLEASE ONLY RETURN JSON, DO NOT WRITE ANY OTHER WORDS. I NEED PLAIN TEXT."
+            }
+        ],
+        "max_tokens": 250,
+        "temperature": 0.5
+    }
+
+    response = requests.post(AZURE_OPENAI_ENDPOINT, headers=headers, json=data)
+    print(response)
+    if response.status_code != 200:
+        raise HTTPException(status_code=response.status_code, detail=response.json())
+
+    gpt_response = response.json()["choices"][0]["message"]["content"].strip().replace("\n", "").replace('\\', "").replace("```json", "").replace("```", "")
+
+    try:
+        return json.loads(gpt_response)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Error decoding GPT response.")
+
 @app.post("/login/", response_model=Token)
 def login_for_access_token(user: UserLogin, db: Session = Depends(get_db)) -> Token:
     db_user = db.query(UserInDB).filter(UserInDB.email == user.email).first()
@@ -86,56 +118,65 @@ def get_me(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="User not found")
     return user
 
-
 @app.post("/send/")
-async def send_excel_as_csv_to_openai(grade: str = Form(...), curator: str = Form(...), file: UploadFile = File(...), token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+async def send_excel_as_csv_to_openai(
+    grade: str = Form(...),
+    curator: str = Form(...),
+    subject: str = Form(...),
+    file: UploadFile = File(...),
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+):
     try:
-        user_data = verify_access_token(token)  
+        user_data = verify_access_token(token)
         if not user_data:
             raise HTTPException(status_code=401, detail="Invalid or expired token")
 
         contents = await file.read()
         excel_data = BytesIO(contents)
-
         df = pd.read_excel(excel_data)
         csv_data = StringIO()
         df.to_csv(csv_data, index=False)
-        csv_text = csv_data.getvalue()  
+        csv_text = csv_data.getvalue()
+        print("csv text:", csv_text)
 
-        headers = {
-            "Content-Type": "application/json",
-            "api-key": AZURE_API_KEY
-        }
+        json_response = analyze_excel(csv_text)
 
-        data = {
-            "messages": [
-                {"role": "system", "content": "You are an assistant that processes CSV data and provides insights."},
-                {"role": "user", "content": f"Here's the CSV data:\n{csv_text}\n You should provide feedback in json format: 'student_name': student name, 'score': score, 'teacher_score': teacher score. YOU SHOULD ONLY RETURN JSON, DONT WRITE ANY OTHER WORDS. I NEED PLAIN TEXT"}
-            ],
-            "max_tokens": 250,
-            "temperature": 0.5
-        }
+        print(json_response)
 
-        response = requests.post(AZURE_OPENAI_ENDPOINT, headers=headers, json=data)
+        user = db.query(UserInDB).filter(UserInDB.email == user_data["sub"]).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
 
-        if response.status_code != 200:
-            raise HTTPException(status_code=response.status_code, detail=response.json())
+        db_grade = db.query(GradeInDB).filter(GradeInDB.grade == grade, GradeInDB.curatorName == curator).first()
 
-        gpt_response = response.json()["choices"][0]["message"]["content"].strip().replace("\n", "").replace('\\', "").replace("```json", "").replace("```", "")
+        if not db_grade:
+            db_grade = GradeInDB(grade=grade, curatorName=curator, user_id=user.id)
+            db.add(db_grade)
+            db.commit()
+            db.refresh(db_grade)
 
-        try:
-            json_response = json.loads(gpt_response)
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=500, detail="Error decoding GPT response.")
-
+        print("pre for")
         for analysis_item in json_response:
-            db_student = db.query(StudentInDB).filter(StudentInDB.name == analysis_item["student_name"]).first()
+            student_name = analysis_item["student_name"]
+            print(student_name)
+            actual_score = [score if score is not None else 0.0 for score in analysis_item['actual_score']]
+            print(actual_score)
+            predicted_scores = [score if score is not None else 0.0 for score in analysis_item['predicted_score']]
+            print(predicted_scores)
+            print(subject)
+            # Ensure both lists have the same length
+            if len(actual_score) != len(predicted_scores):
+                raise HTTPException(status_code=400, detail="Actual scores and predicted scores must have the same length.")
 
-            score_difference = abs(analysis_item["score"] - analysis_item["teacher_score"])
-            if analysis_item["teacher_score"] != 0:
-                percentage_difference = (score_difference / analysis_item["teacher_score"]) * 100
-            else:
-                percentage_difference = 0 
+            print("prescore dif")
+            score_differences = [abs(a - p) for a, p in zip(actual_score, predicted_scores)]  # Subtracting individual elements
+            print("postscord dif")
+            total_score_difference = sum(score_differences)  # Summing all individual differences
+
+            # Calculate the total percentage difference
+            total_predicted_score = sum(predicted_scores)
+            percentage_difference = (total_score_difference / total_predicted_score * 100) if total_predicted_score != 0 else 0
 
             if percentage_difference < 5:
                 danger_level = 0  # White
@@ -146,37 +187,40 @@ async def send_excel_as_csv_to_openai(grade: str = Form(...), curator: str = For
             else:
                 danger_level = 3  # Red
 
-            if db_student:
-                db_student.actual_score = analysis_item["score"]
-                db_student.teacher_score = analysis_item["teacher_score"]
-                db_student.danger_level = danger_level
+            db_student = db.query(StudentInDB).filter(StudentInDB.name == student_name).first()
+
+            if not db_student:
+                # Add grade_id to the new student
+                db_student = StudentInDB(name=student_name, grade_id=db_grade.id)  # Assign grade_id
+                db.add(db_student)
+                db.commit()
+                db.refresh(db_student)
+
+            db_score = db.query(ScoresInDB).filter(ScoresInDB.student_id == db_student.id).first()
+
+            if db_score:
+                db_score.actual_scores = actual_score
+                db_score.predicted_scores = predicted_scores
+                db_score.danger_level = danger_level
+                db_score.delta_percentage = round(percentage_difference, 1)
             else:
-                db_grade = db.query(GradeInDB).filter(GradeInDB.grade == grade, GradeInDB.curatorName == curator).first()
-
-                user_id = db.query(UserInDB).filter(UserInDB.email == user_data["sub"]).first().id
-                if not db_grade:
-                    db_grade = GradeInDB(grade=grade, curatorName=curator, user_id=user_id)
-                    db.add(db_grade)
-                    db.commit()
-                    db.refresh(db_grade)
-
-                new_student = StudentInDB(
-                    name=analysis_item["student_name"],
-                    actual_score=analysis_item["score"],
-                    teacher_score=analysis_item["teacher_score"],
-                    danger_level=danger_level,  
-                    delta_percentage= round(percentage_difference, 2),
-                    grade_id=db_grade.id  
+                new_score = ScoresInDB(
+                    subject_name=subject,
+                    actual_scores=actual_score,
+                    predicted_scores=predicted_scores,
+                    danger_level=danger_level,
+                    delta_percentage=round(percentage_difference, 1),
+                    student_id=db_student.id,
                 )
-                db.add(new_student)
+                db.add(new_score)
 
-        db.commit() 
+        db.commit()
 
         return {"analysis": json_response}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
 @app.get("/get_class")
 def get_class_data(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     try:
@@ -202,17 +246,34 @@ def get_class_data(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
             student_info_list = []
             
             for student in students:
+                # Assuming ScoresInDB stores the actual and teacher scores
+                student_scores = db.query(ScoresInDB).filter(ScoresInDB.student_id == student.id).all()
+
+                # Initialize score values
+                actual_score = []
+                teacher_score = []
+                danger_level = None
+                delta_percentage = None
+
+                for score in student_scores:
+                    actual_score.extend(score.actual_scores)
+                    teacher_score.extend(score.predicted_scores)
+                    danger_level = score.danger_level  # assuming all have same danger level
+                    delta_percentage = score.delta_percentage  # assuming same for all
+                    subject_name = score.subject_name
+
                 student_info_list.append({
                     "student_name": student.name,
-                    "actual_score": student.actual_score,
-                    "teacher_score": student.teacher_score,
-                    "danger_level": student.danger_level,
-                    "delta_percentage": student.delta_percentage,
-                    "class_liter": grade.grade,
+                    "actual_score": actual_score,
+                    "predicted_score": teacher_score,
+                    "danger_level": danger_level,
+                    "delta_percentage": delta_percentage,
+                    "class_liter": grade.grade,  # This is the grade name
                 })
                 
             class_data.append({
                 "curator_name": grade.curatorName,
+                "subject_name": subject_name,
                 "grade_liter": grade.grade,
                 "class": student_info_list
             })
