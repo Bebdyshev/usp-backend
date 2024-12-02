@@ -13,6 +13,7 @@ from io import BytesIO, StringIO
 import json
 import os
 from dotenv import load_dotenv
+import numpy as np
 
 load_dotenv()
 
@@ -34,36 +35,75 @@ app.add_middleware(
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 def analyze_excel(csv_text):
-    headers = {
-            "Content-Type": "application/json",
-            "api-key": AZURE_API_KEY
-    }
-    data = {
-        "messages": [
-            {
-                "role": "system", 
-                "content": "You are an assistant that processes CSV data and provides insights."
-            },
-            {
-                "role": "user",
-                "content": f"Here's the CSV data:\n{csv_text}\nYou should provide feedback in JSON format like this: \n[{{'student_name': 'student_name', 'actual_score': [1score, 2score, 3score, 4score, total_score], 'predicted_score': [1score, 2score, 3score, 4score, total_score]}}]\n. PLEASE ONLY RETURN JSON, DO NOT WRITE ANY OTHER WORDS. I NEED PLAIN TEXT."
-            }
-        ],
-        "max_tokens": 250,
-        "temperature": 0.5
-    }
+    # headers = {
+    #         "Content-Type": "application/json",
+    #         "api-key": AZURE_API_KEY
+    # }
+    # data = {
+    #     "messages": [
+    #         {
+    #             "role": "system", 
+    #             "content": "You are an assistant that processes CSV data and provides insights."
+    #         },
+    #         {
+    #             "role": "user",
+    #             "content": f"Here's the CSV data:\n{csv_text}\nYou should provide feedback in JSON format like this: \n[{{'student_name': 'student_name', 'actual_score': [1score, 2score, 3score, 4score, total_score], 'predicted_score': [1score, 2score, 3score, 4score, total_score]}}]\n. PLEASE ONLY RETURN JSON, DO NOT WRITE ANY OTHER WORDS. I NEED PLAIN TEXT."
+    #         }
+    #     ],
+    #     "max_tokens": 500,
+    #     "temperature": 0.5
+    # }
 
-    response = requests.post(AZURE_OPENAI_ENDPOINT, headers=headers, json=data)
-    print(response)
-    if response.status_code != 200:
-        raise HTTPException(status_code=response.status_code, detail=response.json())
+    # response = requests.post(AZURE_OPENAI_ENDPOINT, headers=headers, json=data)
+    # print(response)
+    # if response.status_code != 200:
+    #     raise HTTPException(status_code=response.status_code, detail=response.json())
 
-    gpt_response = response.json()["choices"][0]["message"]["content"].strip().replace("\n", "").replace('\\', "").replace("```json", "").replace("```", "")
+    # gpt_response = response.json()["choices"][0]["message"]["content"].strip().replace("\n", "").replace('\\', "").replace("```json", "").replace("```", "")
+    # print(gpt_response)
+
+    #csv analyze
+
+    df = pd.read_csv(StringIO(csv_text))
+
+    result = []
+
+    for index, row in df.iterrows():
+
+        if row.isna().all():
+            continue
+        student_name = str(row[0]).split(',')[0].strip()  
+        
+        try:
+            actual_scores = [None if pd.isna(score) else float(score) for score in row[1:5].tolist()]
+        except ValueError:
+            continue  
+
+        try:
+            predicted_scores = [None if pd.isna(score) else float(score) for score in row[5:9].tolist()]
+        except ValueError:
+            continue  
+        actual_scores.append(0.0)
+    
+        predicted_scores.append(0.0)
+        
+        student_data = {
+            "student_name": student_name,
+            "actual_score": actual_scores,
+            "predicted_score": predicted_scores
+        }
+
+        result.append(student_data)
+
+    print(result)
 
     try:
-        return json.loads(gpt_response)
+        return result
     except json.JSONDecodeError:
         raise HTTPException(status_code=500, detail="Error decoding GPT response.")
+
+def replace_nan_with_zero(scores):
+    return [score if score is not None else 0.0 for score in scores]
 
 @app.post("/login/", response_model=Token)
 def login_for_access_token(user: UserLogin, db: Session = Depends(get_db)) -> Token:
@@ -73,7 +113,7 @@ def login_for_access_token(user: UserLogin, db: Session = Depends(get_db)) -> To
 
     access_token_expires = timedelta(minutes=30)
     access_token = create_access_token(
-        data={"sub": user.email, "role": db_user.doctor_type},  # Use 'doctor_type' for user role
+        data={"sub": user.email, "role": db_user.doctor_type},  
         expires_delta=access_token_expires
     )
     return {"access_token": access_token, "token_type": "bearer", "role": db_user.doctor_type}
@@ -164,20 +204,20 @@ async def send_excel_as_csv_to_openai(
             print(actual_score)
             predicted_scores = [score if score is not None else 0.0 for score in analysis_item['predicted_score']]
             print(predicted_scores)
-            print(subject)
-            # Ensure both lists have the same length
+
+
+            # Check lengths
             if len(actual_score) != len(predicted_scores):
                 raise HTTPException(status_code=400, detail="Actual scores and predicted scores must have the same length.")
 
-            print("prescore dif")
+            # Calculate score differences, ensuring no NaN values
             score_differences = [abs(a - p) for a, p in zip(actual_score, predicted_scores)]  # Subtracting individual elements
-            print("postscord dif")
-            total_score_difference = sum(score_differences)  # Summing all individual differences
+            total_score_difference = sum(score_differences)
 
-            # Calculate the total percentage difference
             total_predicted_score = sum(predicted_scores)
             percentage_difference = (total_score_difference / total_predicted_score * 100) if total_predicted_score != 0 else 0
 
+            # Adjust danger level logic based on percentage difference
             if percentage_difference < 5:
                 danger_level = 0  # White
             elif 5 <= percentage_difference <= 10:
@@ -186,6 +226,7 @@ async def send_excel_as_csv_to_openai(
                 danger_level = 2  # Yellow
             else:
                 danger_level = 3  # Red
+            print('danger level', danger_level)
 
             db_student = db.query(StudentInDB).filter(StudentInDB.name == student_name).first()
 
@@ -197,12 +238,17 @@ async def send_excel_as_csv_to_openai(
                 db.refresh(db_student)
 
             db_score = db.query(ScoresInDB).filter(ScoresInDB.student_id == db_student.id).first()
-
+            print(actual_score, predicted_scores)
             if db_score:
+                print("its inside of if")
                 db_score.actual_scores = actual_score
+                print("actual score")
                 db_score.predicted_scores = predicted_scores
+                print("predicted score")
                 db_score.danger_level = danger_level
+                print("danger score")
                 db_score.delta_percentage = round(percentage_difference, 1)
+                print("delta score")
             else:
                 new_score = ScoresInDB(
                     subject_name=subject,
@@ -212,7 +258,10 @@ async def send_excel_as_csv_to_openai(
                     delta_percentage=round(percentage_difference, 1),
                     student_id=db_student.id,
                 )
+                print(new_score)
+
                 db.add(new_score)
+            print(db_score)
 
         db.commit()
 
@@ -284,3 +333,16 @@ def get_class_data(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
         raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail="An error occurred while fetching class data")
+    
+@app.delete("/delete_all/")
+def delete_all(db: Session = Depends(get_db)):
+    try:
+        db.query(ScoresInDB).delete()
+        db.query(StudentInDB).delete()
+        db.query(GradeInDB).delete()
+        
+        db.commit()  
+        return {"message": "All users, grades, students, and scores deleted successfully."}
+    except Exception as e:
+        db.rollback() 
+        raise HTTPException(status_code=500, detail=str(e))
