@@ -13,9 +13,9 @@ class UserInDB(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True)
+    type = Column(String, index=True)
     email = Column(String, unique=True, index=True)
     hashed_password = Column(String)
-    doctor_type = Column(String)
 
     grades = relationship("GradeInDB", back_populates="user")
 
@@ -62,6 +62,7 @@ class CreateUser(BaseModel):
     name: str
     email: str
     password: str
+    type: str
 
 class CreateRecord(BaseModel):
     grade: str
@@ -85,3 +86,4 @@ class UserLogin(BaseModel):
 
 class Token(BaseModel):
     access_token: str
+    type: str

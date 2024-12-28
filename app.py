@@ -35,34 +35,6 @@ app.add_middleware(
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 def analyze_excel(csv_text):
-    # headers = {
-    #         "Content-Type": "application/json",
-    #         "api-key": AZURE_API_KEY
-    # }
-    # data = {
-    #     "messages": [
-    #         {
-    #             "role": "system", 
-    #             "content": "You are an assistant that processes CSV data and provides insights."
-    #         },
-    #         {
-    #             "role": "user",
-    #             "content": f"Here's the CSV data:\n{csv_text}\nYou should provide feedback in JSON format like this: \n[{{'student_name': 'student_name', 'actual_score': [1score, 2score, 3score, 4score, total_score], 'predicted_score': [1score, 2score, 3score, 4score, total_score]}}]\n. PLEASE ONLY RETURN JSON, DO NOT WRITE ANY OTHER WORDS. I NEED PLAIN TEXT."
-    #         }
-    #     ],
-    #     "max_tokens": 500,
-    #     "temperature": 0.5
-    # }
-
-    # response = requests.post(AZURE_OPENAI_ENDPOINT, headers=headers, json=data)
-    # print(response)
-    # if response.status_code != 200:
-    #     raise HTTPException(status_code=response.status_code, detail=response.json())
-
-    # gpt_response = response.json()["choices"][0]["message"]["content"].strip().replace("\n", "").replace('\\', "").replace("```json", "").replace("```", "")
-    # print(gpt_response)
-
-    #csv analyze
 
     df = pd.read_csv(StringIO(csv_text))
 
@@ -113,10 +85,10 @@ def login_for_access_token(user: UserLogin, db: Session = Depends(get_db)) -> To
 
     access_token_expires = timedelta(minutes=30)
     access_token = create_access_token(
-        data={"sub": user.email, "role": db_user.doctor_type},  
+        data={"sub": user.email, "type": db_user.type},  
         expires_delta=access_token_expires
     )
-    return {"access_token": access_token, "token_type": "bearer", "role": db_user.doctor_type}
+    return {"access_token": access_token, "type": db_user.type}
 
 @app.post("/register/", response_model=Token)
 def register_user(user: CreateUser, db: Session = Depends(get_db)) -> Token:
@@ -125,17 +97,17 @@ def register_user(user: CreateUser, db: Session = Depends(get_db)) -> Token:
         raise HTTPException(status_code=400, detail="Email already registered")
 
     hashed_password = hash_password(user.password)
-    new_user = UserInDB(email=user.email, hashed_password=hashed_password, name=user.name, doctor_type="default") 
+    new_user = UserInDB(email=user.email, hashed_password=hashed_password, name=user.name, type=user.type) 
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
 
     access_token_expires = timedelta(minutes=30)
     access_token = create_access_token(
-        data={"sub": new_user.email, "role": new_user.doctor_type}, 
+        data={"sub": new_user.email, "type": new_user.type}, 
         expires_delta=access_token_expires
     )
-    return {"access_token": access_token, "token_type": "bearer", "role": new_user.doctor_type}
+    return {"access_token": access_token, "type": new_user.type}
 
 @app.delete("/users/", response_model=dict)
 def delete_all_users(db: Session = Depends(get_db)):
