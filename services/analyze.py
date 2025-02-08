@@ -1,5 +1,7 @@
 import pandas as pd
+from fastapi import HTTPException
 from io import StringIO
+import json 
 
 def analyze_excel(csv_text):
 
