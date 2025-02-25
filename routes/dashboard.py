@@ -71,13 +71,31 @@ def get_danger_level_stats(
     }
 
 @router.get("/danger-levels-piechart")
-def get_class_level_danger_percentages(
+def get_class_danger_percentages(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
 ):
     user_data = verify_access_token(token)
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    total_students_by_class = db.query(
+        GradeInDB.grade,
+        func.count(StudentInDB.id)
+    ).join(StudentInDB, StudentInDB.grade_id == GradeInDB.id) \
+     .group_by(GradeInDB.grade).all()
+
+    total_students_dict = {grade: count for grade, count in total_students_by_class}
+    total_students = sum(total_students_dict.values())
+
+    if not total_students:
+        return {
+            "class_danger_percentages": [],
+            "overall_danger_summary": {
+                "total_danger_students": 0,
+                "percentage_of_all_students": 0.00
+            }
+        }
 
     class_danger_stats = db.query(
         GradeInDB.grade,
@@ -88,36 +106,37 @@ def get_class_level_danger_percentages(
      .group_by(GradeInDB.grade, ScoresInDB.danger_level) \
      .order_by(GradeInDB.grade, ScoresInDB.danger_level).all()
 
-    total_students_per_class = db.query(
-        GradeInDB.grade,
-        func.count(ScoresInDB.student_id).label("total_students")
-    ).join(StudentInDB, StudentInDB.grade_id == GradeInDB.id) \
-     .join(ScoresInDB, ScoresInDB.student_id == StudentInDB.id) \
-     .group_by(GradeInDB.grade).all()
+    class_percentages = {}
+    danger_students_by_class = {}
 
-    total_students_dict = {grade: total for grade, total in total_students_per_class}
+    total_students_by_danger = {1: 0, 2: 0, 3: 0}  
 
-    class_level_percentages = {}
     for grade, danger_level, student_count in class_danger_stats:
-        class_level = re.match(r'\d+', grade).group() if re.match(r'\d+', grade) else "Unknown"
-        if class_level not in class_level_percentages:
-            class_level_percentages[class_level] = {}
+        if danger_level > 0:  
+            total_students_by_danger[danger_level] += student_count  
 
-        if grade not in class_level_percentages[class_level]:
-            class_level_percentages[class_level][grade] = {1: 0, 2: 0, 3: 0} 
+        if grade not in class_percentages:
+            class_percentages[grade] = {1: 0, 2: 0, 3: 0}
+            danger_students_by_class[grade] = 0
 
-        class_level_percentages[class_level][grade][danger_level] = student_count
+        if danger_level > 0:  
+            class_percentages[grade][danger_level] += student_count
+            danger_students_by_class[grade] += student_count  
 
-    class_level_percentage_list = []
-    for class_level, grades in class_level_percentages.items():
-        level_data = {"class_level": class_level, "grades": []}
-        for grade, levels in grades.items():
-            total_students = total_students_dict.get(grade, 1)  
-            percentages = {level: (count / total_students) * 100 for level, count in levels.items()}
-            level_data["grades"].append({
-                "grade": grade,
-                "percentages": {level: round(percentages.get(level, 0), 2) for level in [1, 2, 3]}
-            })
-        class_level_percentage_list.append(level_data)
+    total_danger_students = sum(danger_students_by_class.values())
 
-    return {"class_level_danger_percentages": class_level_percentage_list}
+    class_danger_result = []
+    for grade, levels in class_percentages.items():
+        total_danger = danger_students_by_class.get(grade, 0)
+
+        class_danger_result.append({
+            "grade": grade,
+            "1": round((levels[1] / total_students_by_danger[1]) * 100, 2) if total_students_by_danger[1] > 0 else 0.00,
+            "2": round((levels[2] / total_students_by_danger[2]) * 100, 2) if total_students_by_danger[2] > 0 else 0.00,
+            "3": round((levels[3] / total_students_by_danger[3]) * 100, 2) if total_students_by_danger[3] > 0 else 0.00,
+            "total": round((total_danger / total_danger_students) * 100, 2) if total_danger_students > 0 else 0.00
+        })
+
+    return {
+        "class_danger_percentages": class_danger_result
+    }
