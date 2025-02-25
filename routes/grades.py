@@ -7,6 +7,7 @@ from routes.auth import oauth2_scheme
 import pandas as pd
 from io import BytesIO, StringIO
 from services.analyze import analyze_excel
+from typing import Optional
 
 router = APIRouter()
 
@@ -234,7 +235,7 @@ def get_students_by_danger_level(
                 })
         
         if not class_data:
-            raise HTTPException(status_code=404, detail="No students found with danger level greater than the specified value")
+            class_data = []
 
         return {"filtered_class_data": class_data}
 
