@@ -1,16 +1,23 @@
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from config import init_db, get_db
+from config import init_db, get_db, reset_db
 from routes.auth import router as auth_router
 from routes.grades import router as grades_router
 from routes.dashboard import router as dashboard_router
 from routes.classes import router as classes_router
 import os
+import sys
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 load_dotenv()
+
+# Check for command line arguments
+if len(sys.argv) > 1 and sys.argv[1] == "--reset-db":
+    reset_db()
+    print("Exiting after database reset.")
+    sys.exit(0)
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 

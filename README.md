@@ -19,6 +19,11 @@
    uvicorn app:app --reload
    ```
 
+5. If you need to reset the database (drop and recreate all tables):
+   ```
+   python app.py --reset-db
+   ```
+
 ## Database Connection
 
 The application is configured to connect to PostgreSQL with the following details:

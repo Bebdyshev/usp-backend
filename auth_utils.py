@@ -1,4 +1,4 @@
-import jwt
+import jwt as pyjwt
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
 
@@ -21,14 +21,14 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
     else:
         expire = datetime.utcnow() + timedelta(minutes=15)
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    encoded_jwt = pyjwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
 def verify_access_token(token: str):
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = pyjwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload
-    except jwt.ExpiredSignatureError:
+    except pyjwt.ExpiredSignatureError:
         return None
-    except jwt.InvalidTokenError:
+    except pyjwt.InvalidTokenError:
         return None
