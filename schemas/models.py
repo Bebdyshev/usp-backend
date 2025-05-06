@@ -1,5 +1,5 @@
 from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey
-from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.dialects.postgresql import JSON, JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from pydantic import BaseModel
@@ -50,8 +50,8 @@ class ScoresInDB(Base):
     id = Column(Integer, primary_key=True, index=True)
     teacher_name = Column(String, index=True)
     subject_name = Column(String, index=True)
-    actual_scores = Column(JSON, index=True)
-    predicted_scores = Column(JSON, index=True)
+    actual_scores = Column(JSONB)
+    predicted_scores = Column(JSONB)
     danger_level = Column(Integer, index=True)
     delta_percentage = Column(Float, index=True)
 
