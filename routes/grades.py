@@ -336,7 +336,7 @@ async def update_grade(
     for key, value in update_dict.items():
         # Проверяем, что мы обновляем только существующие атрибуты
         if hasattr(grade, key):
-            setattr(grade, key, value)
+                setattr(grade, key, value)
         else:
             print(f"Warning: Grade has no attribute {key}")
     
