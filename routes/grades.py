@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Body, Query
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Body, Query, status
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from config import get_db
 from schemas.models import *
 from auth_utils import verify_access_token
@@ -7,7 +8,7 @@ from routes.auth import oauth2_scheme
 import pandas as pd
 from io import BytesIO, StringIO
 from services.analyze import analyze_excel
-from typing import Optional
+from typing import Optional, List
 
 router = APIRouter()
 
@@ -243,3 +244,169 @@ def get_students_by_danger_level(
         raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail="An error occurred while fetching class data")
+
+@router.get("/all", response_model=List[dict])
+async def get_all_grades(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Get information about all grades/classes"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    # Get all grades
+    grades = db.query(GradeInDB).all()
+    
+    result = []
+    for grade in grades:
+        # Count actual students in this grade
+        actual_student_count = db.query(func.count(StudentInDB.id)).filter(StudentInDB.grade_id == grade.id).scalar()
+        
+        result.append({
+            "id": grade.id,
+            "grade": grade.grade,
+            "parallel": grade.parallel,
+            "curatorName": grade.curatorName,
+            "shanyrak": grade.shanyrak,
+            "studentCount": grade.studentcount,
+            "actualStudentCount": actual_student_count
+        })
+    
+    return result
+
+@router.post("/", status_code=status.HTTP_201_CREATED)
+async def create_grade(
+    record: CreateRecord,
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Create a new grade/class"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    # Check if the user is an admin
+    if user_data.get("type") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can create classes")
+    
+    db_grade = GradeInDB(
+        grade=record.grade,
+        parallel=record.parallel,
+        curatorName=record.curatorName,
+        shanyrak=record.shanyrak,
+        studentcount=record.studentCount,
+        user_id=user_data.get("id")
+    )
+    
+    db.add(db_grade)
+    db.commit()
+    db.refresh(db_grade)
+    
+    return {"id": db_grade.id, "message": "Grade created successfully"}
+
+@router.put("/{grade_id}", status_code=status.HTTP_200_OK)
+async def update_grade(
+    grade_id: int,
+    update_data: UpdateGrade,
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Update a grade/class by ID"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    
+    # Check if the user is an admin
+    if user_data.get("type") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can update classes")
+    
+    grade = db.query(GradeInDB).filter(GradeInDB.id == grade_id).first()
+    if not grade:
+        raise HTTPException(status_code=404, detail="Grade not found")
+    
+    # Update only the fields that are provided
+    update_dict = update_data.dict(exclude_unset=True)
+    
+    # Специальная обработка для studentCount -> studentcount
+    if "studentCount" in update_dict:
+        grade.studentcount = update_dict.pop("studentCount")
+    
+    for key, value in update_dict.items():
+        # Проверяем, что мы обновляем только существующие атрибуты
+        if hasattr(grade, key):
+            setattr(grade, key, value)
+        else:
+            print(f"Warning: Grade has no attribute {key}")
+    
+    db.commit()
+    db.refresh(grade)
+    
+    print("Updated grade data:", {
+        "id": grade.id,
+        "grade": grade.grade,
+        "parallel": grade.parallel,
+        "curatorName": grade.curatorName,
+        "shanyrak": grade.shanyrak,
+        "studentcount": grade.studentcount
+    })
+    
+    return {"message": "Grade updated successfully"}
+
+@router.delete("/{grade_id}", status_code=status.HTTP_200_OK)
+async def delete_grade(
+    grade_id: int,
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Delete a grade/class by ID"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    # Check if the user is an admin
+    if user_data.get("type") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can delete classes")
+    
+    grade = db.query(GradeInDB).filter(GradeInDB.id == grade_id).first()
+    if not grade:
+        raise HTTPException(status_code=404, detail="Grade not found")
+    
+    # Delete the grade
+    db.delete(grade)
+    db.commit()
+    
+    return {"message": "Grade deleted successfully"}
+
+@router.put("/{grade_id}/student-count", status_code=status.HTTP_200_OK)
+async def update_student_count(
+    grade_id: int,
+    student_count: int = Body(..., embed=True),
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Update student count for a grade/class"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    # Check if the user is an admin
+    if user_data.get("type") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can update classes")
+    
+    grade = db.query(GradeInDB).filter(GradeInDB.id == grade_id).first()
+    if not grade:
+        raise HTTPException(status_code=404, detail="Grade not found")
+    
+    # Update student count
+    grade.studentcount = student_count
+    
+    db.commit()
+    db.refresh(grade)
+    
+    return {
+        "message": "Student count updated successfully",
+        "grade": grade.grade,
+        "studentCount": grade.studentcount
+    }

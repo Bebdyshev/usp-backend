@@ -1,4 +1,4 @@
-import jwt as pyjwt
+import jwt
 from datetime import datetime, timedelta
 from passlib.context import CryptContext
 
@@ -16,19 +16,14 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None):
     to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
-    to_encode.update({"exp": expire})
-    encoded_jwt = pyjwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    # Remove the expiration time for unlimited token lifetime
+    # No exp field means the token will never expire
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
 def verify_access_token(token: str):
     try:
-        payload = pyjwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"verify_exp": False})
         return payload
-    except pyjwt.ExpiredSignatureError:
-        return None
-    except pyjwt.InvalidTokenError:
+    except jwt.InvalidTokenError:
         return None

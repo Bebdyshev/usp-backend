@@ -4,7 +4,7 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from pydantic import BaseModel
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
 Base = declarative_base()
 
@@ -24,7 +24,10 @@ class GradeInDB(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     grade = Column(String, index=True)
+    parallel = Column(String, index=True)
     curatorName = Column(String, index=True)
+    shanyrak = Column(String, index=True)
+    studentcount = Column(Integer, default=0)
     createdAt = Column(DateTime, index=True, default=datetime.utcnow)
 
     user_id = Column(Integer, ForeignKey("users.id"))
@@ -50,8 +53,8 @@ class ScoresInDB(Base):
     id = Column(Integer, primary_key=True, index=True)
     teacher_name = Column(String, index=True)
     subject_name = Column(String, index=True)
-    actual_scores = Column(JSONB)
-    predicted_scores = Column(JSONB)
+    actual_scores = Column(JSON, index=True)
+    predicted_scores = Column(JSON, index=True)
     danger_level = Column(Integer, index=True)
     delta_percentage = Column(Float, index=True)
 
@@ -66,7 +69,10 @@ class CreateUser(BaseModel):
 
 class CreateRecord(BaseModel):
     grade: str
+    parallel: str
     curatorName: Optional[str] = "Unknown Curator"
+    shanyrak: Optional[str] = None
+    studentCount: Optional[int] = 0
 
 class CreateStudent(BaseModel):
     name: str
@@ -87,3 +93,10 @@ class UserLogin(BaseModel):
 class Token(BaseModel):
     access_token: str
     type: str
+
+class UpdateGrade(BaseModel):
+    grade: Optional[str] = None
+    parallel: Optional[str] = None
+    curatorName: Optional[str] = None
+    shanyrak: Optional[str] = None
+    studentCount: Optional[int] = None
