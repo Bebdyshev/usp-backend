@@ -129,7 +129,9 @@ def debug_all_data(db: Session = Depends(get_db)):
             "email": user.email,
             "name": user.name,
             "type": user.type,
-            "hashed_password": user.hashed_password
+            "hashed_password": user.hashed_password,
+            # Add test passwords for each user type
+            "test_password": "admin123" if user.type == "admin" else "user123"
         } for user in users]
 
         # Get all grades
@@ -167,6 +169,19 @@ def debug_all_data(db: Session = Depends(get_db)):
             "student_id": score.student_id
         } for score in scores]
 
+        # Add test user if no users exist
+        if not users_data:
+            test_password = "admin123"
+            hashed_test_password = hash_password(test_password)
+            users_data.append({
+                "id": "test",
+                "email": "admin@test.com",
+                "name": "Test Admin",
+                "type": "admin",
+                "hashed_password": hashed_test_password,
+                "test_password": test_password
+            })
+
         return {
             "database_info": {
                 "total_users": len(users_data),
@@ -177,7 +192,17 @@ def debug_all_data(db: Session = Depends(get_db)):
             "users": users_data,
             "grades": grades_data,
             "students": students_data,
-            "scores": scores_data
+            "scores": scores_data,
+            "test_credentials": {
+                "admin": {
+                    "email": "admin@test.com",
+                    "password": "admin123"
+                },
+                "user": {
+                    "email": "user@test.com",
+                    "password": "user123"
+                }
+            }
         }
     except Exception as e:
         logger.error(f"Error in debug_all_data: {str(e)}")
