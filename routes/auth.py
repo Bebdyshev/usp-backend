@@ -12,15 +12,19 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 @router.post("/login", response_model=Token)
 def login(user: UserLogin, db: Session = Depends(get_db)):
-    db_user = db.query(UserInDB).filter(UserInDB.email == user.email).first()
-    if not db_user or not verify_password(user.password, db_user.hashed_password):
-        raise HTTPException(status_code=400, detail="Invalid credentials")
+    try:
+        db_user = db.query(UserInDB).filter(UserInDB.email == user.email).first()
+        if not db_user or not verify_password(user.password, db_user.hashed_password):
+            raise HTTPException(status_code=400, detail="Invalid credentials")
 
-    access_token = create_access_token(
-        data={"sub": user.email, "type": db_user.type},
-        expires_delta=timedelta(minutes=30)
-    )
-    return {"access_token": access_token, "type": db_user.type}
+        access_token = create_access_token(
+            data={"sub": user.email, "type": db_user.type},
+            expires_delta=timedelta(minutes=30)
+        )
+        return {"access_token": access_token, "type": db_user.type}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
 
 @router.post("/register", response_model=Token)
 def register(user: CreateUser, db: Session = Depends(get_db)):
