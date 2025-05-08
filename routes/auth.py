@@ -118,3 +118,68 @@ def debug_users(db: Session = Depends(get_db)):
         print("Full traceback:")
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/debug/all")
+def debug_all_data(db: Session = Depends(get_db)):
+    try:
+        # Get all users
+        users = db.query(UserInDB).all()
+        users_data = [{
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "type": user.type,
+            "hashed_password": user.hashed_password
+        } for user in users]
+
+        # Get all grades
+        grades = db.query(GradeInDB).all()
+        grades_data = [{
+            "id": grade.id,
+            "grade": grade.grade,
+            "curatorName": grade.curatorName,
+            "createdAt": grade.createdAt.isoformat() if grade.createdAt else None,
+            "user_id": grade.user_id,
+            "parallel": grade.parallel if hasattr(grade, 'parallel') else None,
+            "shanyrak": grade.shanyrak if hasattr(grade, 'shanyrak') else None,
+            "studentcount": grade.studentcount if hasattr(grade, 'studentcount') else None
+        } for grade in grades]
+
+        # Get all students
+        students = db.query(StudentInDB).all()
+        students_data = [{
+            "id": student.id,
+            "name": student.name,
+            "email": student.email,
+            "grade_id": student.grade_id
+        } for student in students]
+
+        # Get all scores
+        scores = db.query(ScoresInDB).all()
+        scores_data = [{
+            "id": score.id,
+            "teacher_name": score.teacher_name,
+            "subject_name": score.subject_name,
+            "actual_scores": score.actual_scores,
+            "predicted_scores": score.predicted_scores,
+            "danger_level": score.danger_level,
+            "delta_percentage": score.delta_percentage,
+            "student_id": score.student_id
+        } for score in scores]
+
+        return {
+            "database_info": {
+                "total_users": len(users_data),
+                "total_grades": len(grades_data),
+                "total_students": len(students_data),
+                "total_scores": len(scores_data)
+            },
+            "users": users_data,
+            "grades": grades_data,
+            "students": students_data,
+            "scores": scores_data
+        }
+    except Exception as e:
+        logger.error(f"Error in debug_all_data: {str(e)}")
+        logger.error(f"Full traceback:\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
