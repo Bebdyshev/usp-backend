@@ -208,3 +208,20 @@ def debug_all_data(db: Session = Depends(get_db)):
         logger.error(f"Error in debug_all_data: {str(e)}")
         logger.error(f"Full traceback:\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/debug/hash/{password}")
+def debug_hash_password(password: str):
+    try:
+        hashed = hash_password(password)
+        return {
+            "input_password": password,
+            "hashed_password": hashed,
+            "verification": {
+                "should_verify_true": verify_password(password, hashed),
+                "should_verify_false": verify_password("wrong_password", hashed)
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error in debug_hash_password: {str(e)}")
+        logger.error(f"Full traceback:\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=str(e))
