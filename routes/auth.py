@@ -5,6 +5,7 @@ from auth_utils import hash_password, verify_password, create_access_token, veri
 from config import get_db
 from schemas.models import *
 from datetime import timedelta
+import traceback
 
 router = APIRouter()
 
@@ -13,16 +14,34 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 @router.post("/login", response_model=Token)
 def login(user: UserLogin, db: Session = Depends(get_db)):
     try:
+        print(f"Attempting login for email: {user.email}")
         db_user = db.query(UserInDB).filter(UserInDB.email == user.email).first()
-        if not db_user or not verify_password(user.password, db_user.hashed_password):
+        if not db_user:
+            print(f"User not found: {user.email}")
             raise HTTPException(status_code=400, detail="Invalid credentials")
-
+        
+        print(f"Found user: {db_user.email}")
+        print(f"Stored hashed password: {db_user.hashed_password}")
+        print(f"Attempting to verify password")
+        
+        if not verify_password(user.password, db_user.hashed_password):
+            print("Password verification failed")
+            raise HTTPException(status_code=400, detail="Invalid credentials")
+        
+        print("Password verified successfully")
         access_token = create_access_token(
             data={"sub": user.email, "type": db_user.type},
             expires_delta=timedelta(minutes=30)
         )
         return {"access_token": access_token, "type": db_user.type}
+    except HTTPException:
+        # Re-raise HTTP exceptions (like 400 Invalid credentials) without wrapping them
+        raise
     except Exception as e:
+        # Only wrap unexpected errors as 500
+        print("Unexpected error in login:", str(e))
+        print("Full traceback:")
+        print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
     
 
@@ -74,4 +93,25 @@ def delete_all(db: Session = Depends(get_db)):
         return {"message": "All users, grades, students, and scores deleted successfully."}
     except Exception as e:
         db.rollback() 
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/debug/users")
+def debug_users(db: Session = Depends(get_db)):
+    try:
+        users = db.query(UserInDB).all()
+        return {
+            "count": len(users),
+            "users": [
+                {
+                    "id": user.id,
+                    "email": user.email,
+                    "name": user.name,
+                    "type": user.type
+                } for user in users
+            ]
+        }
+    except Exception as e:
+        print("Error in debug_users:", str(e))
+        print("Full traceback:")
+        print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
