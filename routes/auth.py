@@ -6,6 +6,11 @@ from config import get_db
 from schemas.models import *
 from datetime import timedelta
 import traceback
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -14,21 +19,20 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 @router.post("/login", response_model=Token)
 def login(user: UserLogin, db: Session = Depends(get_db)):
     try:
-        print(f"Attempting login for email: {user.email}")
+        logger.info(f"Attempting login for email: {user.email}")
         db_user = db.query(UserInDB).filter(UserInDB.email == user.email).first()
         if not db_user:
-            print(f"User not found: {user.email}")
+            logger.warning(f"User not found: {user.email}")
             raise HTTPException(status_code=400, detail="Invalid credentials")
         
-        print(f"Found user: {db_user.email}")
-        print(f"Stored hashed password: {db_user.hashed_password}")
-        print(f"Attempting to verify password")
+        logger.info(f"Found user: {db_user.email}")
+        logger.info("Attempting to verify password")
         
         if not verify_password(user.password, db_user.hashed_password):
-            print("Password verification failed")
+            logger.warning(f"Password verification failed for user: {user.email}")
             raise HTTPException(status_code=400, detail="Invalid credentials")
         
-        print("Password verified successfully")
+        logger.info(f"Password verified successfully for user: {user.email}")
         access_token = create_access_token(
             data={"sub": user.email, "type": db_user.type},
             expires_delta=timedelta(minutes=30)
@@ -39,9 +43,8 @@ def login(user: UserLogin, db: Session = Depends(get_db)):
         raise
     except Exception as e:
         # Only wrap unexpected errors as 500
-        print("Unexpected error in login:", str(e))
-        print("Full traceback:")
-        print(traceback.format_exc())
+        logger.error(f"Unexpected error in login: {str(e)}")
+        logger.error(f"Full traceback:\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
     
 
