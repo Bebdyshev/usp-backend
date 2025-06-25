@@ -16,6 +16,7 @@ router = APIRouter()
 async def send_excel_as_csv_to_openai(
     grade: str = Form(...),
     curator: str = Form(...),
+    subject: str = Form(...),
     file: UploadFile = File(...),
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
@@ -49,7 +50,14 @@ async def send_excel_as_csv_to_openai(
         db_grade = db.query(GradeInDB).filter(GradeInDB.grade == grade, GradeInDB.curatorName == curator).first()
 
         if not db_grade:
-            db_grade = GradeInDB(grade=grade, curatorName=curator, user_id=user.id)
+            db_grade = GradeInDB(
+                grade=grade, 
+                curatorName=curator, 
+                user_id=user.id,
+                parallel=None,
+                shanyrak=None,
+                studentcount=0
+            )
             db.add(db_grade)
             db.commit()
             db.refresh(db_grade)
@@ -83,8 +91,11 @@ async def send_excel_as_csv_to_openai(
                 danger_level = 3 
             print('danger level', danger_level)
 
-            # Ищем студента в БД
-            db_student = db.query(StudentInDB).filter(StudentInDB.name == student_name).first()
+            # Ищем студента в БД по имени и классу
+            db_student = db.query(StudentInDB).filter(
+                StudentInDB.name == student_name, 
+                StudentInDB.grade_id == db_grade.id
+            ).first()
 
             if not db_student:
                 db_student = StudentInDB(name=student_name, grade_id=db_grade.id) 
@@ -99,9 +110,10 @@ async def send_excel_as_csv_to_openai(
                 db_score.predicted_scores = predicted_scores
                 db_score.danger_level = danger_level
                 db_score.delta_percentage = round(percentage_difference, 1)
+                db_score.subject_name = subject
             else:
                 new_score = ScoresInDB(
-                    subject_name=json_response.get("subject", "Неизвестный предмет"),
+                    subject_name=subject,
                     actual_scores=actual_score,
                     predicted_scores=predicted_scores,
                     danger_level=danger_level,
@@ -144,6 +156,7 @@ def get_class_data(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
         for grade in db_grades:
             students = db.query(StudentInDB).filter(StudentInDB.grade_id == grade.id).all()
             student_info_list = []
+            subject_name = None  # Инициализируем переменную
             
             for student in students:
                 student_scores = db.query(ScoresInDB).filter(ScoresInDB.student_id == student.id).all()
@@ -210,6 +223,7 @@ def get_students_by_danger_level(
             # Получаем студентов в классе
             students = db.query(StudentInDB).filter(StudentInDB.grade_id == grade.id).all()
             student_info_list = []
+            subject_name = None  # Инициализируем переменную
 
             for student in students:
                 # Получаем записи с оценками для студента
@@ -218,6 +232,7 @@ def get_students_by_danger_level(
                 # Ищем студентов с уровнем опасности выше указанного
                 for score in student_scores:
                     if score.danger_level == level:
+                        subject_name = score.subject_name  # Обновляем subject_name
                         student_info_list.append({
                             "student_name": student.name,
                             "actual_score": score.actual_scores,
@@ -230,7 +245,7 @@ def get_students_by_danger_level(
             if student_info_list:
                 class_data.append({
                     "curator_name": grade.curatorName,
-                    "subject_name": score.subject_name,
+                    "subject_name": subject_name,
                     "grade_liter": grade.grade,
                     "class": student_info_list
                 })
@@ -409,4 +424,144 @@ async def update_student_count(
         "message": "Student count updated successfully",
         "grade": grade.grade,
         "studentCount": grade.studentcount
+    }
+
+@router.delete("/students/{student_id}", status_code=status.HTTP_200_OK)
+async def delete_student(
+    student_id: int,
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Delete a student by ID"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    # Check if the user is an admin
+    if user_data.get("type") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can delete students")
+    
+    student = db.query(StudentInDB).filter(StudentInDB.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    
+    # Delete associated scores first
+    db.query(ScoresInDB).filter(ScoresInDB.student_id == student_id).delete()
+    
+    # Delete the student
+    db.delete(student)
+    db.commit()
+    
+    return {"message": "Student deleted successfully"}
+
+@router.get("/subjects", response_model=List[str])
+async def get_subjects(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Get list of all unique subjects"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    # Get unique subjects from scores table
+    subjects = db.query(ScoresInDB.subject_name).distinct().all()
+    subject_list = [subject[0] for subject in subjects if subject[0] is not None]
+    
+    return subject_list
+
+@router.get("/parallels", response_model=List[str])
+async def get_parallels(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Get list of all unique parallels/grades"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    # Get unique grades from grades table
+    parallels = db.query(GradeInDB.grade).distinct().all()
+    parallel_list = [parallel[0] for parallel in parallels if parallel[0] is not None]
+    
+    return parallel_list
+
+@router.get("/students/{grade_id}", response_model=List[dict])
+async def get_students_by_grade(
+    grade_id: int,
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Get all students in a specific grade"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    grade = db.query(GradeInDB).filter(GradeInDB.id == grade_id).first()
+    if not grade:
+        raise HTTPException(status_code=404, detail="Grade not found")
+    
+    students = db.query(StudentInDB).filter(StudentInDB.grade_id == grade_id).all()
+    
+    result = []
+    for student in students:
+        result.append({
+            "id": student.id,
+            "name": student.name,
+            "email": student.email,
+            "grade_id": student.grade_id
+        })
+    
+    return result
+
+@router.post("/students/", status_code=status.HTTP_201_CREATED)
+async def create_student(
+    student_data: CreateStudent,
+    grade_id: int = Body(...),
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Create a new student in a specific grade"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    # Check if the user is an admin
+    if user_data.get("type") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can create students")
+    
+    # Check if grade exists
+    grade = db.query(GradeInDB).filter(GradeInDB.id == grade_id).first()
+    if not grade:
+        raise HTTPException(status_code=404, detail="Grade not found")
+    
+    # Check if student with this name already exists in this grade
+    existing_student = db.query(StudentInDB).filter(
+        StudentInDB.name == student_data.name,
+        StudentInDB.grade_id == grade_id
+    ).first()
+    
+    if existing_student:
+        raise HTTPException(status_code=400, detail="Student with this name already exists in this grade")
+    
+    # Create new student
+    db_student = StudentInDB(
+        name=student_data.name,
+        email=student_data.email,
+        grade_id=grade_id
+    )
+    
+    db.add(db_student)
+    db.commit()
+    db.refresh(db_student)
+    
+    return {
+        "id": db_student.id,
+        "message": "Student created successfully",
+        "student": {
+            "id": db_student.id,
+            "name": db_student.name,
+            "email": db_student.email,
+            "grade_id": db_student.grade_id
+        }
     }
