@@ -9,11 +9,34 @@ from routes.users import router as users_router
 from routes.subjects import router as subjects_router
 import os
 import sys
+import subprocess
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 load_dotenv()
+
+# Автоматический запуск миграций при старте приложения
+def run_migrations():
+    """Запускает миграции Alembic при старте приложения"""
+    try:
+        if os.getenv("RUN_MIGRATIONS", "false").lower() == "true":
+            print("Running database migrations...")
+            result = subprocess.run(["alembic", "upgrade", "head"], 
+                                  capture_output=True, text=True, check=True)
+            print("Migrations completed successfully!")
+            print(result.stdout)
+        else:
+            print("Migrations skipped (RUN_MIGRATIONS not set to true)")
+    except subprocess.CalledProcessError as e:
+        print(f"Migration failed: {e}")
+        print(f"Error output: {e.stderr}")
+        # Не останавливаем приложение, если миграции не удались
+    except Exception as e:
+        print(f"Unexpected error during migration: {e}")
+
+# Запускаем миграции при старте
+run_migrations()
 
 app = FastAPI()
 

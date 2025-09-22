@@ -40,7 +40,7 @@ def upgrade() -> None:
     
     # Add missing columns to scores table
     op.add_column('scores', sa.Column('semester', sa.Integer(), nullable=True, server_default='1'))
-    op.add_column('scores', sa.Column('academic_year', sa.String(10), nullable=True, server_default="'2024-2025'"))
+    op.add_column('scores', sa.Column('academic_year', sa.String(10), nullable=True, server_default='2024-2025'))
     op.add_column('scores', sa.Column('created_at', sa.DateTime(), nullable=True))
     op.add_column('scores', sa.Column('updated_at', sa.DateTime(), nullable=True))
     op.add_column('scores', sa.Column('grade_id', sa.Integer(), nullable=True))
