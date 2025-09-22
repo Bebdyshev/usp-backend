@@ -6,6 +6,7 @@ from routes.grades import router as grades_router
 from routes.dashboard import router as dashboard_router
 from routes.classes import router as classes_router
 from routes.users import router as users_router
+from routes.subjects import router as subjects_router
 import os
 import sys
 from dotenv import load_dotenv
@@ -31,3 +32,4 @@ app.include_router(grades_router, prefix="/grades", tags=["Grades"])
 app.include_router(dashboard_router, prefix="/dashboard", tags=["Dashboard"])
 app.include_router(classes_router, prefix="/classes", tags=["Classes"])
 app.include_router(users_router, prefix="/users", tags=["Users"])
+app.include_router(subjects_router, prefix="/subjects", tags=["Subjects"])

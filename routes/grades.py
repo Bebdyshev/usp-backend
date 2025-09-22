@@ -174,6 +174,7 @@ def get_class_data(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
                     subject_name = score.subject_name
 
                 student_info_list.append({
+                    "id": student.id,
                     "student_name": student.name,
                     "actual_score": actual_score,
                     "predicted_score": teacher_score,
@@ -234,6 +235,7 @@ def get_students_by_danger_level(
                     if score.danger_level == level:
                         subject_name = score.subject_name  # Обновляем subject_name
                         student_info_list.append({
+                            "id": student.id,
                             "student_name": student.name,
                             "actual_score": score.actual_scores,
                             "predicted_score": score.predicted_scores,

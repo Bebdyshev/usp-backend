@@ -70,6 +70,7 @@ class ScoresInDB(Base):
     id = Column(Integer, primary_key=True, index=True)
     teacher_name = Column(String(255), nullable=False, index=True)
     subject_name = Column(String(100), nullable=False, index=True)
+    subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=True, index=True)  # New relation to subjects
     actual_scores = Column(JSONB, nullable=True)  # Changed from JSON to JSONB, removed index
     predicted_scores = Column(JSONB, nullable=True)  # Changed from JSON to JSONB, removed index
     danger_level = Column(Integer, nullable=False, index=True)
@@ -85,6 +86,8 @@ class ScoresInDB(Base):
     grade_id = Column(Integer, ForeignKey("grades.id", ondelete="CASCADE"), nullable=False)
     grade = relationship("GradeInDB", back_populates="scores")
 
+    subject = relationship("SubjectInDB", back_populates="scores")  # New relationship
+
     # GIN indexes for JSONB columns (better for JSON queries)
     __table_args__ = (
         Index('ix_scores_actual_scores_gin', 'actual_scores', postgresql_using='gin'),
@@ -92,6 +95,18 @@ class ScoresInDB(Base):
         Index('ix_scores_student_subject', 'student_id', 'subject_name'),
         Index('ix_scores_grade_semester', 'grade_id', 'semester'),
     )
+
+class SubjectInDB(Base):
+    __tablename__ = "subjects"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False, unique=True, index=True)
+    description = Column(Text, nullable=True)
+    is_active = Column(Integer, default=1, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    scores = relationship("ScoresInDB", back_populates="subject")
 
 # ==================== PYDANTIC MODELS ====================
 
@@ -237,6 +252,26 @@ class Token(BaseModel):
 
 class TokenData(BaseModel):
     email: Optional[str] = None
+
+class CreateSubject(BaseModel):
+    name: str
+    description: Optional[str] = None
+
+class UpdateSubject(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    is_active: Optional[int] = None
+
+class SubjectResponse(BaseModel):
+    id: int
+    name: str
+    description: Optional[str] = None
+    is_active: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
 
 # ==================== LEGACY MODELS (for backward compatibility) ====================
 
