@@ -32,8 +32,71 @@ async def get_all_users(
         result.append({
             "id": user.id,
             "name": user.name,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
             "email": user.email,
-            "type": user.type
+            "type": user.type,
+            "company_name": user.company_name,
+            "shanyrak": user.shanyrak,
+            "is_active": user.is_active,
+            "created_at": user.created_at,
+            "updated_at": user.updated_at
+        })
+    
+    return result
+
+@router.get("/by-type/{user_type}", response_model=List[dict])
+async def get_users_by_type(
+    user_type: str,
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Get users by type (curator, teacher, admin, etc.)"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    # Validate user type
+    valid_types = ['admin', 'curator', 'teacher', 'user']
+    if user_type not in valid_types:
+        raise HTTPException(status_code=400, detail=f"Invalid user type. Must be one of: {valid_types}")
+    
+    users = db.query(UserInDB).filter(
+        UserInDB.type == user_type,
+        UserInDB.is_active == 1
+    ).all()
+    
+    result = []
+    for user in users:
+        # Get additional info based on user type
+        additional_info = {}
+        
+        if user_type == 'curator':
+            # Count assigned grades
+            grade_count = db.query(GradeInDB).filter(GradeInDB.curator_id == user.id).count()
+            additional_info['assigned_grades_count'] = grade_count
+        
+        elif user_type == 'teacher':
+            # Count teaching assignments
+            assignment_count = db.query(TeacherAssignmentInDB).filter(
+                TeacherAssignmentInDB.teacher_id == user.id,
+                TeacherAssignmentInDB.is_active == 1
+            ).count()
+            additional_info['assignment_count'] = assignment_count
+        
+        result.append({
+            "id": user.id,
+            "name": user.name,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "email": user.email,
+            "type": user.type,
+            "company_name": user.company_name,
+            "shanyrak": user.shanyrak,
+            "is_active": user.is_active,
+            "created_at": user.created_at,
+            "updated_at": user.updated_at,
+            **additional_info
         })
     
     return result

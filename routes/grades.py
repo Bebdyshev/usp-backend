@@ -185,7 +185,7 @@ def get_class_data(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
                 })
                 
             class_data.append({
-                "curator_name": grade.curatorName,
+                "curator_name": grade.curator_name,
                 "subject_name": subject_name,
                 "grade_liter": grade.grade,
                 "class": student_info_list
@@ -281,21 +281,71 @@ async def get_all_grades(
         # Count actual students in this grade
         actual_student_count = db.query(func.count(StudentInDB.id)).filter(StudentInDB.grade_id == grade.id).scalar()
         
+        # Get curator information if assigned
+        curator_info = None
+        if grade.curator_id:
+            curator = db.query(UserInDB).filter(UserInDB.id == grade.curator_id).first()
+            if curator:
+                curator_info = {
+                    "id": curator.id,
+                    "name": curator.name,
+                    "first_name": curator.first_name,
+                    "last_name": curator.last_name,
+                    "email": curator.email,
+                    "shanyrak": curator.shanyrak
+                }
+        
         result.append({
             "id": grade.id,
             "grade": grade.grade,
             "parallel": grade.parallel,
-            "curatorName": grade.curatorName,
-            "shanyrak": grade.shanyrak,
-            "studentCount": grade.studentcount,
-            "actualStudentCount": actual_student_count
+            "curator_id": grade.curator_id,
+            "curator_name": grade.curator_name,
+            "student_count": grade.student_count,
+            "actual_student_count": actual_student_count,
+            "curator_info": curator_info
+        })
+    
+    return result
+
+@router.get("/curators", response_model=List[dict])
+async def get_available_curators(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Get list of users who can be assigned as curators"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    curators = db.query(UserInDB).filter(
+        UserInDB.type.in_(['curator', 'admin']),
+        UserInDB.is_active == 1
+    ).all()
+    
+    result = []
+    for curator in curators:
+        # Count how many grades this curator is assigned to
+        grade_count = db.query(GradeInDB).filter(
+            GradeInDB.curator_id == curator.id
+        ).count()
+        
+        result.append({
+            "id": curator.id,
+            "name": curator.name,
+            "first_name": curator.first_name,
+            "last_name": curator.last_name,
+            "email": curator.email,
+            "type": curator.type,
+            "shanyrak": curator.shanyrak,
+            "assigned_grades_count": grade_count
         })
     
     return result
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
 async def create_grade(
-    record: CreateRecord,
+    record: CreateGrade,
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
 ):
@@ -308,13 +358,33 @@ async def create_grade(
     if user_data.get("type") != "admin":
         raise HTTPException(status_code=403, detail="Only admins can create classes")
     
+    # Resolve current user (creator) id
+    creator_user = db.query(UserInDB).filter(UserInDB.email == user_data.get("sub")).first()
+    if not creator_user:
+        # fallback to id from token if present
+        creator_id = user_data.get("id")
+    else:
+        creator_id = creator_user.id
+
+    # Validate curator if provided
+    curator_name = None
+    if record.curator_id:
+        curator = db.query(UserInDB).filter(
+            UserInDB.id == record.curator_id,
+            UserInDB.type.in_(['curator', 'admin']),
+            UserInDB.is_active == 1
+        ).first()
+        if not curator:
+            raise HTTPException(status_code=404, detail="Curator not found or not valid")
+        curator_name = curator.name
+    
     db_grade = GradeInDB(
         grade=record.grade,
         parallel=record.parallel,
-        curatorName=record.curatorName,
-        shanyrak=record.shanyrak,
-        studentcount=record.studentCount,
-        user_id=user_data.get("id")
+        curator_id=record.curator_id,
+        curator_name=curator_name or record.curator_name,
+        student_count=record.student_count or 0,
+        user_id=creator_id
     )
     
     db.add(db_grade)
@@ -505,14 +575,48 @@ async def get_students_by_grade(
         raise HTTPException(status_code=404, detail="Grade not found")
     
     students = db.query(StudentInDB).filter(StudentInDB.grade_id == grade_id).all()
-    
+
     result = []
     for student in students:
+        # Latest score entry for this student in this grade (any subject), by updated_at
+        latest_score = db.query(ScoresInDB).filter(
+            ScoresInDB.student_id == student.id,
+            ScoresInDB.grade_id == grade_id
+        ).order_by(ScoresInDB.updated_at.desc()).first()
+
+        average_percentage = None
+        predicted_average = None
+        danger_level = None
+        delta_percentage = None
+        subject_name = None
+        semester = None
+
+        if latest_score:
+            try:
+                actual_list = latest_score.actual_scores or []
+                predicted_list = latest_score.predicted_scores or []
+                if isinstance(actual_list, list) and len(actual_list) > 0:
+                    average_percentage = round(sum(actual_list) / len(actual_list), 1)
+                if isinstance(predicted_list, list) and len(predicted_list) > 0:
+                    predicted_average = round(sum(predicted_list) / len(predicted_list), 1)
+            except Exception:
+                pass
+            danger_level = latest_score.danger_level
+            delta_percentage = latest_score.delta_percentage
+            subject_name = latest_score.subject_name
+            semester = latest_score.semester
+
         result.append({
             "id": student.id,
             "name": student.name,
             "email": student.email,
-            "grade_id": student.grade_id
+            "grade_id": student.grade_id,
+            "avg_percentage": average_percentage,
+            "predicted_avg": predicted_average,
+            "danger_level": danger_level,
+            "delta_percentage": delta_percentage,
+            "last_subject": subject_name,
+            "last_semester": semester,
         })
     
     return result
@@ -607,6 +711,16 @@ async def upload_excel_grades(
         subject = db.query(SubjectInDB).filter(SubjectInDB.id == subject_id).first()
         if not subject:
             raise HTTPException(status_code=404, detail="Subject not found")
+
+        # Validate subject applicable for grade parallel
+        try:
+            grade_parallel_int = int(grade.parallel)
+        except Exception:
+            grade_parallel_int = None
+        if grade_parallel_int is not None:
+            applicable = subject.applicable_parallels or []
+            if len(applicable) > 0 and grade_parallel_int not in applicable:
+                raise HTTPException(status_code=400, detail=f"Subject '{subject.name}' is not applicable for parallel {grade.parallel}")
         
         # Validate subgroup if provided
         subgroup = None

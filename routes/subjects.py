@@ -41,9 +41,16 @@ async def create_subject(
     if existing_subject:
         raise HTTPException(status_code=400, detail="Subject with this name already exists")
     
+    # Validate applicable_parallels (1..12, no duplicates)
+    parallels = subject.applicable_parallels or []
+    if any(p < 1 or p > 12 for p in parallels):
+        raise HTTPException(status_code=400, detail="applicable_parallels must contain integers from 1 to 12")
+    parallels = sorted(list(set(parallels)))
+
     db_subject = SubjectInDB(
         name=subject.name,
         description=subject.description,
+        applicable_parallels=parallels,
         is_active=1
     )
     
@@ -102,6 +109,13 @@ async def update_subject(
         if existing_subject:
             raise HTTPException(status_code=400, detail="Subject with this name already exists")
     
+    # Validate parallels
+    if "applicable_parallels" in update_dict and update_dict["applicable_parallels"] is not None:
+        parallels = update_dict["applicable_parallels"]
+        if any(p < 1 or p > 12 for p in parallels):
+            raise HTTPException(status_code=400, detail="applicable_parallels must contain integers from 1 to 12")
+        update_dict["applicable_parallels"] = sorted(list(set(parallels)))
+
     for key, value in update_dict.items():
         if hasattr(subject, key):
             setattr(subject, key, value)

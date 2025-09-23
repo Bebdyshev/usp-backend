@@ -12,16 +12,21 @@ class UserInDB(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(255), nullable=False, index=True)
+    name = Column(String(255), nullable=False, index=True)  # Full name for backward compatibility
+    first_name = Column(String(100), nullable=True, index=True)
+    last_name = Column(String(100), nullable=True, index=True)
     type = Column(String(50), nullable=False, index=True, default='user')
     email = Column(String(255), unique=True, nullable=False, index=True)
     hashed_password = Column(String(255), nullable=False)
     company_name = Column(String(255), nullable=True)
+    shanyrak = Column(String(255), nullable=True)  # For curators
     is_active = Column(Integer, default=1, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    grades = relationship("GradeInDB", back_populates="user", cascade="all, delete-orphan")
+    grades = relationship("GradeInDB", foreign_keys="GradeInDB.user_id", back_populates="user", cascade="all, delete-orphan")
+    curated_grades = relationship("GradeInDB", foreign_keys="GradeInDB.curator_id", back_populates="curator")
+    teacher_assignments = relationship("TeacherAssignmentInDB", foreign_keys="TeacherAssignmentInDB.teacher_id", back_populates="teacher")
 
 class GradeInDB(Base):
     __tablename__ = "grades"
@@ -29,14 +34,15 @@ class GradeInDB(Base):
     id = Column(Integer, primary_key=True, index=True)
     grade = Column(String(50), nullable=False, index=True)
     parallel = Column(String(50), nullable=False, index=True)
-    curator_name = Column(String(255), nullable=False, index=True)
-    shanyrak = Column(String(255), nullable=True)
+    curator_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    curator_name = Column(String(255), nullable=True, index=True)  # Keep for backward compatibility
     student_count = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    user = relationship("UserInDB", back_populates="grades")
+    user = relationship("UserInDB", foreign_keys=[user_id], back_populates="grades")
+    curator = relationship("UserInDB", foreign_keys=[curator_id], back_populates="curated_grades")
 
     students = relationship("StudentInDB", back_populates="grade", cascade="all, delete-orphan")
     scores = relationship("ScoresInDB", back_populates="grade", cascade="all, delete-orphan")
@@ -102,6 +108,7 @@ class SubjectInDB(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), nullable=False, unique=True, index=True)
     description = Column(Text, nullable=True)
+    applicable_parallels = Column(JSONB, nullable=False, default=[])
     is_active = Column(Integer, default=1, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -125,25 +132,34 @@ class SystemSettingsInDB(Base):
 
 class CreateUser(BaseModel):
     name: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
     email: str
     password: str
     type: str = "user"
     company_name: Optional[str] = None
+    shanyrak: Optional[str] = None
 
 class UpdateUser(BaseModel):
     name: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
     email: Optional[str] = None
     password: Optional[str] = None
     type: Optional[str] = None
     company_name: Optional[str] = None
+    shanyrak: Optional[str] = None
     is_active: Optional[int] = None
 
 class UserResponse(BaseModel):
     id: int
     name: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
     email: str
     type: str
     company_name: Optional[str] = None
+    shanyrak: Optional[str] = None
     is_active: int
     created_at: datetime
     updated_at: datetime
@@ -154,27 +170,28 @@ class UserResponse(BaseModel):
 class CreateGrade(BaseModel):
     grade: str
     parallel: str
-    curator_name: str = "Unknown Curator"
-    shanyrak: Optional[str] = None
+    curator_id: Optional[int] = None
+    curator_name: Optional[str] = None  # Keep for backward compatibility
     student_count: Optional[int] = 0
 
 class UpdateGrade(BaseModel):
     grade: Optional[str] = None
     parallel: Optional[str] = None
+    curator_id: Optional[int] = None
     curator_name: Optional[str] = None
-    shanyrak: Optional[str] = None
     student_count: Optional[int] = None
 
 class GradeResponse(BaseModel):
     id: int
     grade: str
     parallel: str
-    curator_name: str
-    shanyrak: Optional[str] = None
+    curator_id: Optional[int] = None
+    curator_name: Optional[str] = None
     student_count: int
     created_at: datetime
     updated_at: datetime
     user_id: int
+    curator_info: Optional[dict] = None  # Will include curator details
 
     class Config:
         from_attributes = True
@@ -269,16 +286,19 @@ class TokenData(BaseModel):
 class CreateSubject(BaseModel):
     name: str
     description: Optional[str] = None
+    applicable_parallels: List[int] = []
 
 class UpdateSubject(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     is_active: Optional[int] = None
+    applicable_parallels: Optional[List[int]] = None
 
 class SubjectResponse(BaseModel):
     id: int
     name: str
     description: Optional[str] = None
+    applicable_parallels: List[int]
     is_active: int
     created_at: datetime
     updated_at: datetime
