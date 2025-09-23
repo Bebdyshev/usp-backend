@@ -318,6 +318,257 @@ class AvailableClassesResponse(BaseModel):
     classes: List[str]
     grades: List[int]
 
+# ==================== NEW MODELS FOR ENHANCED SCHOOL MANAGEMENT ====================
+
+class SubgroupInDB(Base):
+    __tablename__ = "subgroups"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False, index=True)  # e.g., "Подгруппа А", "Подгруппа Б"
+    grade_id = Column(Integer, ForeignKey("grades.id", ondelete="CASCADE"), nullable=False)
+    is_active = Column(Integer, default=1, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    grade = relationship("GradeInDB", back_populates="subgroups")
+    students = relationship("StudentInDB", back_populates="subgroup")
+    teacher_assignments = relationship("TeacherAssignmentInDB", back_populates="subgroup")
+
+class CuratorGradeInDB(Base):
+    __tablename__ = "curator_grades"
+
+    id = Column(Integer, primary_key=True, index=True)
+    curator_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    grade_id = Column(Integer, ForeignKey("grades.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    curator = relationship("UserInDB", foreign_keys=[curator_id])
+    grade = relationship("GradeInDB", foreign_keys=[grade_id])
+
+    # Unique constraint: one curator per grade
+    __table_args__ = (
+        Index('ix_curator_grades_unique', 'curator_id', 'grade_id', unique=True),
+    )
+
+class TeacherAssignmentInDB(Base):
+    __tablename__ = "teacher_assignments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    teacher_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    subject_id = Column(Integer, ForeignKey("subjects.id", ondelete="CASCADE"), nullable=False)
+    grade_id = Column(Integer, ForeignKey("grades.id", ondelete="CASCADE"), nullable=True)
+    subgroup_id = Column(Integer, ForeignKey("subgroups.id", ondelete="CASCADE"), nullable=True)
+    is_active = Column(Integer, default=1, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    teacher = relationship("UserInDB", foreign_keys=[teacher_id])
+    subject = relationship("SubjectInDB", foreign_keys=[subject_id])
+    grade = relationship("GradeInDB", foreign_keys=[grade_id])
+    subgroup = relationship("SubgroupInDB", foreign_keys=[subgroup_id])
+
+    # Unique constraint: one teacher per subject per subgroup (or grade if no subgroup)
+    __table_args__ = (
+        Index('ix_teacher_assignment_unique', 'teacher_id', 'subject_id', 'grade_id', 'subgroup_id', unique=True),
+    )
+
+class DisciplinaryActionInDB(Base):
+    __tablename__ = "disciplinary_actions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    student_id = Column(Integer, ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    action_type = Column(String(100), nullable=False, index=True)  # "warning", "suspension", etc.
+    description = Column(Text, nullable=False)
+    severity_level = Column(Integer, nullable=False, index=True, default=1)  # 1-5 scale
+    issued_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    action_date = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    is_resolved = Column(Integer, default=0, index=True)
+    resolution_notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    student = relationship("StudentInDB", back_populates="disciplinary_actions")
+    issuer = relationship("UserInDB", foreign_keys=[issued_by])
+
+class AchievementInDB(Base):
+    __tablename__ = "achievements"
+
+    id = Column(Integer, primary_key=True, index=True)
+    student_id = Column(Integer, ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    title = Column(String(255), nullable=False, index=True)
+    description = Column(Text, nullable=True)
+    category = Column(String(100), nullable=False, index=True)  # "academic", "sports", "arts", etc.
+    achievement_date = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    awarded_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    points = Column(Integer, default=0, index=True)  # Achievement points/score
+    certificate_url = Column(String(500), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    student = relationship("StudentInDB", back_populates="achievements")
+    awarder = relationship("UserInDB", foreign_keys=[awarded_by])
+
+# Update existing models to add new relationships
+# Add to GradeInDB
+GradeInDB.subgroups = relationship("SubgroupInDB", back_populates="grade", cascade="all, delete-orphan")
+GradeInDB.curator_assignments = relationship("CuratorGradeInDB", foreign_keys="CuratorGradeInDB.grade_id")
+
+# Add to StudentInDB
+StudentInDB.subgroup_id = Column(Integer, ForeignKey("subgroups.id"), nullable=True)
+StudentInDB.user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # For student login accounts
+StudentInDB.subgroup = relationship("SubgroupInDB", back_populates="students")
+StudentInDB.user_account = relationship("UserInDB", foreign_keys="StudentInDB.user_id")
+StudentInDB.disciplinary_actions = relationship("DisciplinaryActionInDB", back_populates="student", cascade="all, delete-orphan")
+StudentInDB.achievements = relationship("AchievementInDB", back_populates="student", cascade="all, delete-orphan")
+
+# Add to ScoresInDB
+ScoresInDB.subgroup_id = Column(Integer, ForeignKey("subgroups.id"), nullable=True)
+ScoresInDB.subgroup = relationship("SubgroupInDB")
+
+# ==================== PYDANTIC MODELS FOR NEW ENTITIES ====================
+
+class CreateSubgroup(BaseModel):
+    name: str
+    grade_id: int
+
+class UpdateSubgroup(BaseModel):
+    name: Optional[str] = None
+    is_active: Optional[int] = None
+
+class SubgroupResponse(BaseModel):
+    id: int
+    name: str
+    grade_id: int
+    is_active: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class CreateCuratorAssignment(BaseModel):
+    curator_id: int
+    grade_id: int
+
+class CuratorAssignmentResponse(BaseModel):
+    id: int
+    curator_id: int
+    grade_id: int
+    created_at: datetime
+    curator_name: Optional[str] = None
+    grade_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+class CreateTeacherAssignment(BaseModel):
+    teacher_id: int
+    subject_id: int
+    grade_id: Optional[int] = None
+    subgroup_id: Optional[int] = None
+
+class UpdateTeacherAssignment(BaseModel):
+    is_active: Optional[int] = None
+
+class TeacherAssignmentResponse(BaseModel):
+    id: int
+    teacher_id: int
+    subject_id: int
+    grade_id: Optional[int] = None
+    subgroup_id: Optional[int] = None
+    is_active: int
+    created_at: datetime
+    updated_at: datetime
+    teacher_name: Optional[str] = None
+    subject_name: Optional[str] = None
+    grade_name: Optional[str] = None
+    subgroup_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+class CreateDisciplinaryAction(BaseModel):
+    student_id: int
+    action_type: str
+    description: str
+    severity_level: int = 1
+    action_date: Optional[datetime] = None
+
+class UpdateDisciplinaryAction(BaseModel):
+    action_type: Optional[str] = None
+    description: Optional[str] = None
+    severity_level: Optional[int] = None
+    is_resolved: Optional[int] = None
+    resolution_notes: Optional[str] = None
+
+class DisciplinaryActionResponse(BaseModel):
+    id: int
+    student_id: int
+    action_type: str
+    description: str
+    severity_level: int
+    issued_by: int
+    action_date: datetime
+    is_resolved: int
+    resolution_notes: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    student_name: Optional[str] = None
+    issuer_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+class CreateAchievement(BaseModel):
+    student_id: int
+    title: str
+    description: Optional[str] = None
+    category: str
+    achievement_date: Optional[datetime] = None
+    points: int = 0
+    certificate_url: Optional[str] = None
+
+class UpdateAchievement(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    achievement_date: Optional[datetime] = None
+    points: Optional[int] = None
+    certificate_url: Optional[str] = None
+
+class AchievementResponse(BaseModel):
+    id: int
+    student_id: int
+    title: str
+    description: Optional[str] = None
+    category: str
+    achievement_date: datetime
+    awarded_by: int
+    points: int
+    certificate_url: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    student_name: Optional[str] = None
+    awarder_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+class ExcelUploadRequest(BaseModel):
+    grade_id: int
+    subject_id: int
+    teacher_name: str
+    semester: int = 1
+    subgroup_id: Optional[int] = None
+
+class ExcelUploadResponse(BaseModel):
+    success: bool
+    message: str
+    imported_count: int
+    warnings: List[str] = []
+    errors: List[str] = []
+    danger_distribution: Dict[str, int] = {}
+
 # ==================== LEGACY MODELS (for backward compatibility) ====================
 
 # Keep these for backward compatibility with existing code

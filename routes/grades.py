@@ -8,6 +8,7 @@ from routes.auth import oauth2_scheme
 import pandas as pd
 from io import BytesIO, StringIO
 from services.analyze import analyze_excel
+from services.excel_parser import parse_excel_grades, generate_excel_template
 from typing import Optional, List
 
 router = APIRouter()
@@ -567,3 +568,197 @@ async def create_student(
             "grade_id": db_student.grade_id
         }
     }
+
+@router.post("/upload", response_model=ExcelUploadResponse)
+async def upload_excel_grades(
+    grade_id: int = Form(...),
+    subject_id: int = Form(...),
+    teacher_name: str = Form(...),
+    semester: int = Form(1),
+    subgroup_id: Optional[int] = Form(None),
+    file: UploadFile = File(...),
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+):
+    """
+    Upload Excel file with student grades
+    Requires: grade_id, subject_id, teacher_name, file
+    Optional: semester (default 1), subgroup_id
+    """
+    try:
+        # Verify admin access
+        user_data = verify_access_token(token)
+        if not user_data:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+        
+        if user_data.get("type") != "admin":
+            raise HTTPException(status_code=403, detail="Only admins can upload grades")
+        
+        # Validate file type
+        if not file.filename.lower().endswith(('.xlsx', '.xls')):
+            raise HTTPException(status_code=400, detail="Only Excel files (.xlsx, .xls) are allowed")
+        
+        # Validate grade exists
+        grade = db.query(GradeInDB).filter(GradeInDB.id == grade_id).first()
+        if not grade:
+            raise HTTPException(status_code=404, detail="Grade not found")
+        
+        # Validate subject exists
+        subject = db.query(SubjectInDB).filter(SubjectInDB.id == subject_id).first()
+        if not subject:
+            raise HTTPException(status_code=404, detail="Subject not found")
+        
+        # Validate subgroup if provided
+        subgroup = None
+        if subgroup_id:
+            subgroup = db.query(SubgroupInDB).filter(
+                SubgroupInDB.id == subgroup_id,
+                SubgroupInDB.grade_id == grade_id
+            ).first()
+            if not subgroup:
+                raise HTTPException(status_code=404, detail="Subgroup not found or doesn't belong to the specified grade")
+        
+        # Read and parse Excel file
+        file_content = await file.read()
+        parsed_data = parse_excel_grades(file_content)
+        
+        # Process students data
+        imported_count = 0
+        warnings = parsed_data.get('warnings', [])
+        errors = parsed_data.get('errors', [])
+        danger_distribution = {0: 0, 1: 0, 2: 0, 3: 0}
+        
+        for student_data in parsed_data['students']:
+            try:
+                student_name = student_data["student_name"]
+                actual_scores = student_data["actual_scores"]
+                predicted_scores = student_data["predicted_scores"]
+                
+                # Calculate danger level using existing logic
+                score_differences = [abs(a - p) for a, p in zip(actual_scores, predicted_scores)]
+                total_score_difference = sum(score_differences)
+                total_predicted_score = sum(predicted_scores)
+                percentage_difference = (total_score_difference / max(total_predicted_score, 1)) * 100
+                
+                # Determine danger_level (same logic as existing endpoint)
+                if percentage_difference < 5:
+                    danger_level = 0
+                elif 5 <= percentage_difference <= 10:
+                    danger_level = 1
+                elif 10 < percentage_difference <= 15:
+                    danger_level = 2
+                else:
+                    danger_level = 3
+                
+                danger_distribution[danger_level] += 1
+                
+                # Find or create student
+                db_student = db.query(StudentInDB).filter(
+                    StudentInDB.name == student_name,
+                    StudentInDB.grade_id == grade_id
+                ).first()
+                
+                if not db_student:
+                    db_student = StudentInDB(
+                        name=student_name,
+                        grade_id=grade_id,
+                        subgroup_id=subgroup_id
+                    )
+                    db.add(db_student)
+                    db.commit()
+                    db.refresh(db_student)
+                else:
+                    # Update subgroup if provided
+                    if subgroup_id and db_student.subgroup_id != subgroup_id:
+                        db_student.subgroup_id = subgroup_id
+                
+                # Find existing score record for this student/subject/semester
+                db_score = db.query(ScoresInDB).filter(
+                    ScoresInDB.student_id == db_student.id,
+                    ScoresInDB.subject_id == subject_id,
+                    ScoresInDB.semester == semester
+                ).first()
+                
+                if db_score:
+                    # Update existing record
+                    db_score.teacher_name = teacher_name
+                    db_score.subject_name = subject.name
+                    db_score.actual_scores = actual_scores
+                    db_score.predicted_scores = predicted_scores
+                    db_score.danger_level = danger_level
+                    db_score.delta_percentage = round(percentage_difference, 1)
+                    db_score.grade_id = grade_id
+                    db_score.subgroup_id = subgroup_id
+                else:
+                    # Create new record
+                    new_score = ScoresInDB(
+                        teacher_name=teacher_name,
+                        subject_name=subject.name,
+                        subject_id=subject_id,
+                        actual_scores=actual_scores,
+                        predicted_scores=predicted_scores,
+                        danger_level=danger_level,
+                        delta_percentage=round(percentage_difference, 1),
+                        semester=semester,
+                        academic_year="2024-2025",  # TODO: Make this configurable
+                        student_id=db_student.id,
+                        grade_id=grade_id,
+                        subgroup_id=subgroup_id
+                    )
+                    db.add(new_score)
+                
+                imported_count += 1
+                
+            except Exception as e:
+                errors.append(f"Error processing student {student_data.get('student_name', 'Unknown')}: {str(e)}")
+                continue
+        
+        db.commit()
+        
+        # Prepare response
+        success = imported_count > 0
+        message = f"Successfully imported {imported_count} student records"
+        if warnings:
+            message += f" with {len(warnings)} warnings"
+        if errors:
+            message += f" and {len(errors)} errors"
+        
+        return ExcelUploadResponse(
+            success=success,
+            message=message,
+            imported_count=imported_count,
+            warnings=warnings,
+            errors=errors,
+            danger_distribution={str(k): v for k, v in danger_distribution.items()}
+        )
+        
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred during upload: {str(e)}")
+
+@router.get("/template")
+async def download_excel_template(
+    token: str = Depends(oauth2_scheme)
+):
+    """Download Excel template for grade upload"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    if user_data.get("type") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can download template")
+    
+    try:
+        template_content = generate_excel_template()
+        
+        from fastapi.responses import Response
+        
+        return Response(
+            content=template_content,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "attachment; filename=grades_template.xlsx"}
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating template: {str(e)}")

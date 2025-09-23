@@ -169,3 +169,6 @@ async def create_system_settings(
     db.refresh(db_settings)
     
     return {"id": db_settings.id, "message": "System settings created successfully"}
+
+
+
