@@ -108,6 +108,19 @@ class SubjectInDB(Base):
 
     scores = relationship("ScoresInDB", back_populates="subject")
 
+class SystemSettingsInDB(Base):
+    __tablename__ = "system_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    min_grade = Column(Integer, nullable=False, default=7)
+    max_grade = Column(Integer, nullable=False, default=12)
+    class_letters = Column(JSONB, nullable=False, default=['A', 'B', 'C', 'D', 'E', 'F'])
+    school_name = Column(String(255), nullable=True, default="Школа")
+    academic_year = Column(String(20), nullable=False, default="2024-2025")
+    is_active = Column(Integer, default=1, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 # ==================== PYDANTIC MODELS ====================
 
 class CreateUser(BaseModel):
@@ -272,6 +285,38 @@ class SubjectResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+class CreateSystemSettings(BaseModel):
+    min_grade: int = 7
+    max_grade: int = 12
+    class_letters: List[str] = ['A', 'B', 'C', 'D', 'E', 'F']
+    school_name: Optional[str] = "Школа"
+    academic_year: str = "2024-2025"
+
+class UpdateSystemSettings(BaseModel):
+    min_grade: Optional[int] = None
+    max_grade: Optional[int] = None
+    class_letters: Optional[List[str]] = None
+    school_name: Optional[str] = None
+    academic_year: Optional[str] = None
+
+class SystemSettingsResponse(BaseModel):
+    id: int
+    min_grade: int
+    max_grade: int
+    class_letters: List[str]
+    school_name: Optional[str]
+    academic_year: str
+    is_active: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class AvailableClassesResponse(BaseModel):
+    classes: List[str]
+    grades: List[int]
 
 # ==================== LEGACY MODELS (for backward compatibility) ====================
 

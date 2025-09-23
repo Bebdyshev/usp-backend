@@ -56,3 +56,17 @@ app.include_router(dashboard_router, prefix="/dashboard", tags=["Dashboard"])
 app.include_router(classes_router, prefix="/classes", tags=["Classes"])
 app.include_router(users_router, prefix="/users", tags=["Users"])
 app.include_router(subjects_router, prefix="/subjects", tags=["Subjects"])
+
+# Import settings router
+from routes.settings import router as settings_router
+app.include_router(settings_router, prefix="/settings", tags=["Settings"])
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "message": "USP Backend is running",
+        "version": "2.1.0",
+        "update": 15
+    }
