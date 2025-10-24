@@ -12,7 +12,9 @@ echo "------------------------------------"
 
 # Run database migrations
 echo "Running database migrations..."
-alembic upgrade head
+# alembic upgrade head
+echo "Migrations step skipped for initial deployment."
+echo "Tables will be created by the application if they don't exist."
 echo "Migrations completed."
 
 # Start the application
