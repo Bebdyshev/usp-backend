@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: usp-backend
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "sh start.sh"
+    dockerfile: Dockerfile
+    envVars:
+      - key: POSTGRES_URL
+        fromDatabase:
+          name: usp-db
+          property: connectionString
+      - key: PYTHON_VERSION
+        value: 3.11
+
+  - type: psql
+    name: usp-db
+    plan: free
+    version: "15"
