@@ -3,6 +3,13 @@
 # Exit immediately if a command exits with a non-zero status.
 set -e
 
+# DEBUG: Print all environment variables to the log
+echo "--- CHECKING ENVIRONMENT VARIABLES ---"
+printenv
+echo "--- Is DATABASE_URL set? ---"
+echo "DATABASE_URL: $DATABASE_URL"
+echo "------------------------------------"
+
 # Run database migrations
 echo "Running database migrations..."
 alembic upgrade head
