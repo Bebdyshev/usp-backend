@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from config import get_db
 from schemas.models import *
+from sqlalchemy import or_
 from auth_utils import verify_access_token
 from routes.auth import oauth2_scheme
 import pandas as pd
@@ -163,14 +164,21 @@ def get_class_data(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
             for student in students:
                 student_scores = db.query(ScoresInDB).filter(ScoresInDB.student_id == student.id).all()
 
-                actual_score = []
-                teacher_score = []
+                actual_scores = []
+                predicted_scores = []
+                previous_class_score = None
+                teacher_percent = None
                 danger_level = None
                 delta_percentage = None
 
                 for score in student_scores:
-                    actual_score.extend(score.actual_scores)
-                    teacher_score.extend(score.predicted_scores)
+                    # Get the latest score record for this student
+                    if score.actual_scores:
+                        actual_scores = score.actual_scores if isinstance(score.actual_scores, list) else []
+                    if score.predicted_scores:
+                        predicted_scores = score.predicted_scores if isinstance(score.predicted_scores, list) else []
+                    if score.previous_class_score is not None:
+                        previous_class_score = score.previous_class_score
                     danger_level = score.danger_level  
                     delta_percentage = score.delta_percentage
                     subject_name = score.subject_name
@@ -178,8 +186,9 @@ def get_class_data(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
                 student_info_list.append({
                     "id": student.id,
                     "student_name": student.name,
-                    "actual_score": actual_score,
-                    "predicted_score": teacher_score,
+                    "previous_class_score": previous_class_score,
+                    "actual_scores": actual_scores,
+                    "predicted_scores": predicted_scores,
                     "danger_level": danger_level,
                     "delta_percentage": delta_percentage,
                     "class_liter": grade.grade,  
@@ -587,6 +596,9 @@ async def get_students_by_grade(
 
         average_percentage = None
         predicted_average = None
+        previous_class_score = None
+        actual_scores = []
+        predicted_scores = []
         danger_level = None
         delta_percentage = None
         subject_name = None
@@ -596,12 +608,17 @@ async def get_students_by_grade(
             try:
                 actual_list = latest_score.actual_scores or []
                 predicted_list = latest_score.predicted_scores or []
-                if isinstance(actual_list, list) and len(actual_list) > 0:
-                    average_percentage = round(sum(actual_list) / len(actual_list), 1)
-                if isinstance(predicted_list, list) and len(predicted_list) > 0:
-                    predicted_average = round(sum(predicted_list) / len(predicted_list), 1)
+                if isinstance(actual_list, list):
+                    actual_scores = actual_list
+                    if len(actual_list) > 0:
+                        average_percentage = round(sum(actual_list) / len(actual_list), 1)
+                if isinstance(predicted_list, list):
+                    predicted_scores = predicted_list
+                    if len(predicted_list) > 0:
+                        predicted_average = round(sum(predicted_list) / len(predicted_list), 1)
             except Exception:
                 pass
+            previous_class_score = latest_score.previous_class_score
             danger_level = latest_score.danger_level
             delta_percentage = latest_score.delta_percentage
             subject_name = latest_score.subject_name
@@ -612,6 +629,9 @@ async def get_students_by_grade(
             "name": student.name,
             "email": student.email,
             "grade_id": student.grade_id,
+            "previous_class_score": previous_class_score,
+            "actual_scores": actual_scores,
+            "predicted_scores": predicted_scores,
             "avg_percentage": average_percentage,
             "predicted_avg": predicted_average,
             "danger_level": danger_level,
@@ -733,9 +753,42 @@ async def upload_excel_grades(
             if not subgroup:
                 raise HTTPException(status_code=404, detail="Subgroup not found or doesn't belong to the specified grade")
         
+        # Load prediction weights from database
+        prediction_settings = db.query(PredictionSettings).filter(
+            PredictionSettings.is_active == 1
+        ).first()
+        
+        weights = {
+            'previous_class': 0.3,
+            'teacher': 0.2,
+            'quarters': 0.5
+        }
+        if prediction_settings and prediction_settings.weights:
+            weights = prediction_settings.weights
+        
+        # Load Excel column mappings from database
+        column_mappings = db.query(ExcelColumnMapping).filter(
+            ExcelColumnMapping.is_active == 1
+        ).all()
+        
+        expected_columns = {
+            'name': ['фио', 'имя', 'name', 'student', 'студент', 'ученик'],
+            'previous_class': ['процент за 1 предыдущий класс', 'previous class', 'previous year', 'предыдущий класс', 'предыдущий год', 'prev class'],
+            'q1': ['q1', 'четверть 1', 'quarter 1', '1 четверть', 'ч1'],
+            'q2': ['q2', 'четверть 2', 'quarter 2', '2 четверть', 'ч2'],
+            'q3': ['q3', 'четверть 3', 'quarter 3', '3 четверть', 'ч3'],
+            'q4': ['q4', 'четверть 4', 'quarter 4', '4 четверть', 'ч4'],
+            'teacher': ['учитель', 'teacher', 'преподаватель', 'препод']
+        }
+        
+        # Override with database mappings if available
+        for mapping in column_mappings:
+            if mapping.field_name in expected_columns and mapping.column_aliases:
+                expected_columns[mapping.field_name] = mapping.column_aliases
+        
         # Read and parse Excel file
         file_content = await file.read()
-        parsed_data = parse_excel_grades(file_content)
+        parsed_data = parse_excel_grades(file_content, expected_columns, weights)
         
         # Process students data
         imported_count = 0
@@ -748,12 +801,22 @@ async def upload_excel_grades(
                 student_name = student_data["student_name"]
                 actual_scores = student_data["actual_scores"]
                 predicted_scores = student_data["predicted_scores"]
+                previous_class_score = student_data.get("previous_class_score")
                 
                 # Calculate danger level using existing logic
-                score_differences = [abs(a - p) for a, p in zip(actual_scores, predicted_scores)]
-                total_score_difference = sum(score_differences)
-                total_predicted_score = sum(predicted_scores)
-                percentage_difference = (total_score_difference / max(total_predicted_score, 1)) * 100
+                # Compare only completed quarters (where actual score is not 0.0)
+                valid_comparisons = []
+                for i, (actual, predicted) in enumerate(zip(actual_scores, predicted_scores)):
+                    # Only compare if we have actual data (not placeholder 0.0)
+                    if actual > 0:
+                        valid_comparisons.append(abs(actual - predicted))
+                
+                if valid_comparisons:
+                    total_score_difference = sum(valid_comparisons)
+                    avg_predicted = sum(predicted_scores[:len(valid_comparisons)]) / len(valid_comparisons) if valid_comparisons else 0
+                    percentage_difference = (total_score_difference / max(avg_predicted * len(valid_comparisons), 1)) * 100
+                else:
+                    percentage_difference = 0
                 
                 # Determine danger_level (новая логика)
                 # меньше 10% - умеренный (1)
@@ -799,6 +862,7 @@ async def upload_excel_grades(
                     # Update existing record
                     db_score.teacher_name = teacher_name
                     db_score.subject_name = subject.name
+                    db_score.previous_class_score = previous_class_score
                     db_score.actual_scores = actual_scores
                     db_score.predicted_scores = predicted_scores
                     db_score.danger_level = danger_level
@@ -811,6 +875,7 @@ async def upload_excel_grades(
                         teacher_name=teacher_name,
                         subject_name=subject.name,
                         subject_id=subject_id,
+                        previous_class_score=previous_class_score,
                         actual_scores=actual_scores,
                         predicted_scores=predicted_scores,
                         danger_level=danger_level,

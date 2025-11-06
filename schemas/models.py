@@ -46,6 +46,8 @@ class GradeInDB(Base):
 
     students = relationship("StudentInDB", back_populates="grade", cascade="all, delete-orphan")
     scores = relationship("ScoresInDB", back_populates="grade", cascade="all, delete-orphan")
+    subgroups = relationship("SubgroupInDB", back_populates="grade", cascade="all, delete-orphan")
+    curator_assignments = relationship("CuratorGradeInDB", foreign_keys="CuratorGradeInDB.grade_id")
 
     # Composite index for better query performance
     __table_args__ = (
@@ -67,6 +69,12 @@ class StudentInDB(Base):
 
     grade_id = Column(Integer, ForeignKey("grades.id", ondelete="CASCADE"), nullable=False)
     grade = relationship("GradeInDB", back_populates="students")
+    subgroup_id = Column(Integer, ForeignKey("subgroups.id"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # For student login accounts
+    subgroup = relationship("SubgroupInDB", back_populates="students")
+    user_account = relationship("UserInDB", foreign_keys="StudentInDB.user_id")
+    disciplinary_actions = relationship("DisciplinaryActionInDB", back_populates="student", cascade="all, delete-orphan")
+    achievements = relationship("AchievementInDB", back_populates="student", cascade="all, delete-orphan")
 
     scores = relationship("ScoresInDB", back_populates="student", cascade="all, delete-orphan")
 
@@ -77,6 +85,7 @@ class ScoresInDB(Base):
     teacher_name = Column(String(255), nullable=False, index=True)
     subject_name = Column(String(100), nullable=False, index=True)
     subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=True, index=True)  # New relation to subjects
+    previous_class_score = Column(Float, nullable=True)
     actual_scores = Column(JSONB, nullable=True)  # Changed from JSON to JSONB, removed index
     predicted_scores = Column(JSONB, nullable=True)  # Changed from JSON to JSONB, removed index
     danger_level = Column(Integer, nullable=False, index=True)
@@ -93,6 +102,8 @@ class ScoresInDB(Base):
     grade = relationship("GradeInDB", back_populates="scores")
 
     subject = relationship("SubjectInDB", back_populates="scores")  # New relationship
+    subgroup_id = Column(Integer, ForeignKey("subgroups.id"), nullable=True)
+    subgroup = relationship("SubgroupInDB")
 
     # GIN indexes for JSONB columns (better for JSON queries)
     __table_args__ = (
@@ -114,6 +125,26 @@ class SubjectInDB(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     scores = relationship("ScoresInDB", back_populates="subject")
+
+class PredictionSettings(Base):
+    __tablename__ = "prediction_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), unique=True, nullable=False, index=True) # e.g., "default_weights"
+    weights = Column(JSONB, nullable=False) # e.g., {"previous_class": 0.3, "teacher": 0.2, "quarters": 0.5}
+    is_active = Column(Integer, default=1, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class ExcelColumnMapping(Base):
+    __tablename__ = "excel_column_mapping"
+
+    id = Column(Integer, primary_key=True, index=True)
+    field_name = Column(String(100), unique=True, nullable=False, index=True) # e.g., "student_name", "q1", "previous_class_score"
+    column_aliases = Column(JSONB, nullable=False) # e.g., ["ФИО", "Student Name", "Name"]
+    is_active = Column(Integer, default=1, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class SystemSettingsInDB(Base):
     __tablename__ = "system_settings"
@@ -588,6 +619,40 @@ class ExcelUploadResponse(BaseModel):
     warnings: List[str] = []
     errors: List[str] = []
     danger_distribution: Dict[str, int] = {}
+
+class PredictionWeightsResponse(BaseModel):
+    id: int
+    name: str
+    weights: Dict[str, float]
+    is_active: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class UpdatePredictionWeights(BaseModel):
+    weights: Dict[str, float]
+    name: Optional[str] = None
+
+class ExcelColumnMappingResponse(BaseModel):
+    id: int
+    field_name: str
+    column_aliases: List[str]
+    is_active: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class CreateExcelColumnMapping(BaseModel):
+    field_name: str
+    column_aliases: List[str]
+
+class UpdateExcelColumnMapping(BaseModel):
+    column_aliases: Optional[List[str]] = None
+    is_active: Optional[int] = None
 
 # ==================== LEGACY MODELS (for backward compatibility) ====================
 
