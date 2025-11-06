@@ -131,7 +131,7 @@ async def delete_subject(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
 ):
-    """Delete a subject by ID (soft delete)"""
+    """Delete a subject by ID (hard delete)"""
     user_data = verify_access_token(token)
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
@@ -144,8 +144,8 @@ async def delete_subject(
     if not subject:
         raise HTTPException(status_code=404, detail="Subject not found")
     
-    # Soft delete by setting is_active to 0
-    subject.is_active = 0
+    # Hard delete - physically remove from database
+    db.delete(subject)
     db.commit()
     
     return {"message": "Subject deleted successfully"}

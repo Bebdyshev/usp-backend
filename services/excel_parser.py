@@ -50,13 +50,12 @@ def calculate_predicted_score(
 ) -> float:
     """
     Calculate predicted score based on available data
-    Default weights: current_quarters 50%, monitoring 30%, teacher 20%
+    New formula: 0.7 * avg(quarters) + 0.3 * teacher_percent
     """
     if weights is None:
         weights = {
-            'current': 0.5,
-            'monitoring': 0.3,
-            'teacher': 0.2
+            'current': 0.7,
+            'teacher': 0.3
         }
     
     # Calculate average of available quarters
@@ -64,13 +63,11 @@ def calculate_predicted_score(
     current_avg = sum(valid_quarters) / len(valid_quarters) if valid_quarters else 0.0
     
     # Use provided values or 0.0 as fallback
-    monitoring = monitoring_percent if monitoring_percent is not None else 0.0
     teacher = teacher_percent if teacher_percent is not None else 0.0
     
-    # Calculate weighted predicted score
+    # Calculate weighted predicted score: 70% quarters average + 30% teacher prediction
     predicted = (
         weights['current'] * current_avg +
-        weights['monitoring'] * monitoring +
         weights['teacher'] * teacher
     )
     

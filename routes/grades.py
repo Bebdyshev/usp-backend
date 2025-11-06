@@ -81,12 +81,13 @@ async def send_excel_as_csv_to_openai(
             total_predicted_score = sum(predicted_scores)
             percentage_difference = (total_score_difference / max(total_predicted_score, 1)) * 100  # Защита от деления на 0
 
-            # Определяем danger_level
-            if percentage_difference < 5:
-                danger_level = 0  
-            elif 5 <= percentage_difference <= 10:
+            # Определяем danger_level (новая логика)
+            # меньше 10% - умеренный (1)
+            # 10-20% - повышенный (2)
+            # больше 20% - критический (3)
+            if percentage_difference < 10:
                 danger_level = 1  
-            elif 10 < percentage_difference <= 15:
+            elif 10 <= percentage_difference <= 20:
                 danger_level = 2  
             else:
                 danger_level = 3 
@@ -754,12 +755,13 @@ async def upload_excel_grades(
                 total_predicted_score = sum(predicted_scores)
                 percentage_difference = (total_score_difference / max(total_predicted_score, 1)) * 100
                 
-                # Determine danger_level (same logic as existing endpoint)
-                if percentage_difference < 5:
-                    danger_level = 0
-                elif 5 <= percentage_difference <= 10:
+                # Determine danger_level (новая логика)
+                # меньше 10% - умеренный (1)
+                # 10-20% - повышенный (2)
+                # больше 20% - критический (3)
+                if percentage_difference < 10:
                     danger_level = 1
-                elif 10 < percentage_difference <= 15:
+                elif 10 <= percentage_difference <= 20:
                     danger_level = 2
                 else:
                     danger_level = 3
