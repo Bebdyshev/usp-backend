@@ -70,26 +70,50 @@ def calculate_predicted_scores_by_quarter(
             'quarters': 0.5
         }
     
-    # Use provided values or 0.0 as fallback
-    prev_score = previous_class_score if previous_class_score is not None else 0.0
-    teacher = teacher_percent if teacher_percent is not None else 0.0
+    w_prev = weights.get('previous_class', 0.3)
+    w_teacher = weights.get('teacher', 0.2)
+    w_quarters = weights.get('quarters', 0.5)
+
+    predicted_scores = [0.0] * 4
+
+    # --- P(Q1) ---
+    # For Q1, prediction is based on previous class and teacher scores.
+    # We need to normalize the weights as there are no previous quarters.
+    base_prediction_components = []
+    total_base_weight = 0
     
-    predicted_scores = []
-    
-    for quarter_idx in range(4):
-        # Calculate average of completed quarters (Q1 to Qn-1)
-        completed_quarters = [q for q in current_quarters[:quarter_idx] if q is not None]
-        quarters_avg = sum(completed_quarters) / len(completed_quarters) if completed_quarters else 0.0
+    if previous_class_score is not None:
+        base_prediction_components.append(w_prev * previous_class_score)
+        total_base_weight += w_prev
         
-        # Calculate predicted score for this quarter
-        predicted = (
-            weights['previous_class'] * prev_score +
-            weights['teacher'] * teacher +
-            weights['quarters'] * quarters_avg
+    if teacher_percent is not None:
+        base_prediction_components.append(w_teacher * teacher_percent)
+        total_base_weight += w_teacher
+
+    if total_base_weight > 0:
+        normalized_prediction = sum(base_prediction_components) / total_base_weight
+        predicted_scores[0] = round(normalized_prediction, 1)
+    else:
+        predicted_scores[0] = 0.0
+
+    # --- P(Q2), P(Q3), P(Q4) ---
+    for i in range(1, 4):
+        prev_quarters = [q for q in current_quarters[:i] if q is not None and q > 0]
+        
+        if not prev_quarters:
+            # If no previous quarters, prediction is the same as for Q1
+            predicted_scores[i] = predicted_scores[0]
+            continue
+            
+        avg_prev_quarters = sum(prev_quarters) / len(prev_quarters)
+        
+        prediction = (
+            (w_prev * previous_class_score if previous_class_score is not None else 0) +
+            (w_teacher * teacher_percent if teacher_percent is not None else 0) +
+            (w_quarters * avg_prev_quarters)
         )
-        
-        predicted_scores.append(round(predicted, 2))
-    
+        predicted_scores[i] = round(prediction, 1)
+
     return predicted_scores
 
 def parse_excel_grades(
