@@ -459,22 +459,7 @@ class AchievementInDB(Base):
     student = relationship("StudentInDB", back_populates="achievements")
     awarder = relationship("UserInDB", foreign_keys=[awarded_by])
 
-# Update existing models to add new relationships
-# Add to GradeInDB
-GradeInDB.subgroups = relationship("SubgroupInDB", back_populates="grade", cascade="all, delete-orphan")
-GradeInDB.curator_assignments = relationship("CuratorGradeInDB", foreign_keys="CuratorGradeInDB.grade_id")
 
-# Add to StudentInDB
-StudentInDB.subgroup_id = Column(Integer, ForeignKey("subgroups.id"), nullable=True)
-StudentInDB.user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # For student login accounts
-StudentInDB.subgroup = relationship("SubgroupInDB", back_populates="students")
-StudentInDB.user_account = relationship("UserInDB", foreign_keys="StudentInDB.user_id")
-StudentInDB.disciplinary_actions = relationship("DisciplinaryActionInDB", back_populates="student", cascade="all, delete-orphan")
-StudentInDB.achievements = relationship("AchievementInDB", back_populates="student", cascade="all, delete-orphan")
-
-# Add to ScoresInDB
-ScoresInDB.subgroup_id = Column(Integer, ForeignKey("subgroups.id"), nullable=True)
-ScoresInDB.subgroup = relationship("SubgroupInDB")
 
 # ==================== PYDANTIC MODELS FOR NEW ENTITIES ====================
 
