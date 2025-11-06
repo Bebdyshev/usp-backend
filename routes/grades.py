@@ -609,13 +609,20 @@ async def get_students_by_grade(
                 actual_list = latest_score.actual_scores or []
                 predicted_list = latest_score.predicted_scores or []
                 if isinstance(actual_list, list):
+                    # Filter out zero scores for correct average calculation
+                    valid_actual_scores = [s for s in actual_list if s is not None and s > 0]
                     actual_scores = actual_list
-                    if len(actual_list) > 0:
-                        average_percentage = round(sum(actual_list) / len(actual_list), 1)
+                    if valid_actual_scores:
+                        average_percentage = round(sum(valid_actual_scores) / len(valid_actual_scores), 1)
                 if isinstance(predicted_list, list):
                     predicted_scores = predicted_list
-                    if len(predicted_list) > 0:
+                    # Predict based on completed quarters
+                    num_completed = len(valid_actual_scores) if 'valid_actual_scores' in locals() else 0
+                    if num_completed > 0 and len(predicted_list) >= num_completed:
+                        predicted_average = round(sum(predicted_list[:num_completed]) / num_completed, 1)
+                    elif predicted_list: # Fallback if no actual scores yet
                         predicted_average = round(sum(predicted_list) / len(predicted_list), 1)
+
             except Exception:
                 pass
             previous_class_score = latest_score.previous_class_score
@@ -803,32 +810,36 @@ async def upload_excel_grades(
                 predicted_scores = student_data["predicted_scores"]
                 previous_class_score = student_data.get("previous_class_score")
                 
-                # Calculate danger level using existing logic
-                # Compare only completed quarters (where actual score is not 0.0)
-                valid_comparisons = []
-                for i, (actual, predicted) in enumerate(zip(actual_scores, predicted_scores)):
-                    # Only compare if we have actual data (not placeholder 0.0)
-                    if actual > 0:
-                        valid_comparisons.append(abs(actual - predicted))
+                # Calculate danger level correctly
+                # Compare only completed quarters (where actual score is not None/0)
                 
-                if valid_comparisons:
-                    total_score_difference = sum(valid_comparisons)
-                    avg_predicted = sum(predicted_scores[:len(valid_comparisons)]) / len(valid_comparisons) if valid_comparisons else 0
-                    percentage_difference = (total_score_difference / max(avg_predicted * len(valid_comparisons), 1)) * 100
-                else:
-                    percentage_difference = 0
+                actual_completed = [s for s in actual_scores if s is not None and s > 0]
+                num_completed = len(actual_completed)
                 
-                # Determine danger_level (новая логика)
-                # меньше 10% - умеренный (1)
-                # 10-20% - повышенный (2)
-                # больше 20% - критический (3)
-                if percentage_difference < 10:
-                    danger_level = 1
-                elif 10 <= percentage_difference <= 20:
-                    danger_level = 2
-                else:
-                    danger_level = 3
-                
+                danger_level = 0 # Default to Normal
+                percentage_difference = 0.0
+
+                if num_completed > 0 and len(predicted_scores) >= num_completed:
+                    predicted_for_completed = predicted_scores[:num_completed]
+                    
+                    avg_actual = sum(actual_completed) / num_completed
+                    avg_predicted = sum(predicted_for_completed) / num_completed
+                    
+                    delta = avg_actual - avg_predicted
+                    
+                    if delta < -15:
+                        danger_level = 3  # Критический
+                    elif delta < -10:
+                        danger_level = 2  # Повышенный
+                    elif delta < -5:
+                        danger_level = 1  # Умеренный
+                    else:
+                        danger_level = 0 # Нормальный
+
+                    # Also calculate a delta percentage for reference if needed
+                    if avg_predicted > 0:
+                        percentage_difference = (delta / avg_predicted) * 100
+
                 danger_distribution[danger_level] += 1
                 
                 # Find or create student
