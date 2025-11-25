@@ -164,6 +164,11 @@ def get_class_data(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
             for student in students:
                 student_scores = db.query(ScoresInDB).filter(ScoresInDB.student_id == student.id).all()
 
+                # Calculate overall average across all subjects
+                all_valid_scores = []
+                overall_danger_level = 0
+                danger_count = 0
+                
                 actual_scores = []
                 predicted_scores = []
                 previous_class_score = None
@@ -172,7 +177,17 @@ def get_class_data(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
                 delta_percentage = None
 
                 for score in student_scores:
-                    # Get the latest score record for this student
+                    # Collect all valid scores across all subjects
+                    if score.actual_scores and isinstance(score.actual_scores, list):
+                        valid_scores = [s for s in score.actual_scores if s is not None and s > 0]
+                        all_valid_scores.extend(valid_scores)
+                    
+                    # Calculate average danger level
+                    if score.danger_level is not None:
+                        overall_danger_level += score.danger_level
+                        danger_count += 1
+                    
+                    # Get the latest score record for this student (for backward compatibility)
                     if score.actual_scores:
                         actual_scores = score.actual_scores if isinstance(score.actual_scores, list) else []
                     if score.predicted_scores:
@@ -182,13 +197,25 @@ def get_class_data(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
                     danger_level = score.danger_level  
                     delta_percentage = score.delta_percentage
                     subject_name = score.subject_name
+                
+                # Calculate overall average percentage
+                avg_percentage = None
+                if all_valid_scores:
+                    avg_percentage = round(sum(all_valid_scores) / len(all_valid_scores), 1)
+                
+                # Calculate average danger level
+                if danger_count > 0:
+                    danger_level = round(overall_danger_level / danger_count)
 
                 student_info_list.append({
                     "id": student.id,
                     "student_name": student.name,
+                    "email": student.email,
                     "previous_class_score": previous_class_score,
+                    "actual_score": actual_scores,  # Keep for backward compatibility
                     "actual_scores": actual_scores,
                     "predicted_scores": predicted_scores,
+                    "avg_percentage": avg_percentage,  # NEW: Overall average
                     "danger_level": danger_level,
                     "delta_percentage": delta_percentage,
                     "class_liter": grade.grade,  
@@ -403,6 +430,52 @@ async def create_grade(
     
     return {"id": db_grade.id, "message": "Grade created successfully"}
 
+@router.get("/{grade_id}", response_model=dict)
+async def get_grade_by_id(
+    grade_id: int,
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Get a grade/class by ID"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    grade = db.query(GradeInDB).filter(GradeInDB.id == grade_id).first()
+    if not grade:
+        raise HTTPException(status_code=404, detail="Grade not found")
+    
+    # Get curator information if assigned
+    curator_info = None
+    if grade.curator_id:
+        curator = db.query(UserInDB).filter(UserInDB.id == grade.curator_id).first()
+        if curator:
+            curator_info = {
+                "id": curator.id,
+                "name": curator.name,
+                "first_name": curator.first_name,
+                "last_name": curator.last_name,
+                "email": curator.email,
+                "shanyrak": curator.shanyrak
+            }
+            
+    # Count actual students
+    actual_student_count = db.query(func.count(StudentInDB.id)).filter(StudentInDB.grade_id == grade.id).scalar()
+    
+    return {
+        "id": grade.id,
+        "grade": grade.grade,
+        "parallel": grade.parallel,
+        "curator_id": grade.curator_id,
+        "curator_name": grade.curator_name,
+        "student_count": grade.student_count,
+        "actual_student_count": actual_student_count,
+        "curator_info": curator_info,
+        "created_at": grade.created_at,
+        "updated_at": grade.updated_at,
+        "user_id": grade.user_id
+    }
+
 @router.put("/{grade_id}", status_code=status.HTTP_200_OK)
 async def update_grade(
     grade_id: int,
@@ -588,18 +661,44 @@ async def get_students_by_grade(
 
     result = []
     for student in students:
-        # Latest score entry for this student in this grade (any subject), by updated_at
+        # Get ALL scores for this student (across all subjects)
+        all_scores = db.query(ScoresInDB).filter(
+            ScoresInDB.student_id == student.id
+        ).all()
+
+        # Calculate overall average across all subjects
+        all_valid_scores = []
+        overall_danger_level = 0
+        danger_count = 0
+        
+        for score in all_scores:
+            if score.actual_scores and isinstance(score.actual_scores, list):
+                valid_scores = [s for s in score.actual_scores if s is not None and s > 0]
+                all_valid_scores.extend(valid_scores)
+            
+            if score.danger_level is not None:
+                overall_danger_level += score.danger_level
+                danger_count += 1
+        
+        # Calculate average percentage across all subjects
+        average_percentage = None
+        if all_valid_scores:
+            average_percentage = round(sum(all_valid_scores) / len(all_valid_scores), 1)
+        
+        # Calculate average danger level
+        danger_level = None
+        if danger_count > 0:
+            danger_level = round(overall_danger_level / danger_count)
+
+        # Get latest score for additional info
         latest_score = db.query(ScoresInDB).filter(
-            ScoresInDB.student_id == student.id,
-            ScoresInDB.grade_id == grade_id
+            ScoresInDB.student_id == student.id
         ).order_by(ScoresInDB.updated_at.desc()).first()
 
-        average_percentage = None
-        predicted_average = None
         previous_class_score = None
         actual_scores = []
         predicted_scores = []
-        danger_level = None
+        predicted_average = None
         delta_percentage = None
         subject_name = None
         semester = None
@@ -609,24 +708,18 @@ async def get_students_by_grade(
                 actual_list = latest_score.actual_scores or []
                 predicted_list = latest_score.predicted_scores or []
                 if isinstance(actual_list, list):
-                    # Filter out zero scores for correct average calculation
                     valid_actual_scores = [s for s in actual_list if s is not None and s > 0]
                     actual_scores = actual_list
-                    if valid_actual_scores:
-                        average_percentage = round(sum(valid_actual_scores) / len(valid_actual_scores), 1)
                 if isinstance(predicted_list, list):
                     predicted_scores = predicted_list
-                    # Predict based on completed quarters
                     num_completed = len(valid_actual_scores) if 'valid_actual_scores' in locals() else 0
                     if num_completed > 0 and len(predicted_list) >= num_completed:
                         predicted_average = round(sum(predicted_list[:num_completed]) / num_completed, 1)
-                    elif predicted_list: # Fallback if no actual scores yet
+                    elif predicted_list:
                         predicted_average = round(sum(predicted_list) / len(predicted_list), 1)
-
             except Exception:
                 pass
             previous_class_score = latest_score.previous_class_score
-            danger_level = latest_score.danger_level
             delta_percentage = latest_score.delta_percentage
             subject_name = latest_score.subject_name
             semester = latest_score.semester
@@ -700,6 +793,73 @@ async def create_student(
             "grade_id": db_student.grade_id
         }
     }
+
+@router.get("/student/{student_id}", response_model=dict)
+async def get_student_by_id(
+    student_id: int,
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Get a student by ID"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    student = db.query(StudentInDB).filter(StudentInDB.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+        
+    return {
+        "id": student.id,
+        "name": student.name,
+        "email": student.email,
+        "student_id_number": student.student_id_number,
+        "phone": student.phone,
+        "parent_contact": student.parent_contact,
+        "grade_id": student.grade_id,
+        "subgroup_id": student.subgroup_id,
+        "is_active": student.is_active,
+        "created_at": student.created_at,
+        "updated_at": student.updated_at
+    }
+
+@router.get("/student/{student_id}/scores", response_model=List[dict])
+async def get_student_scores(
+    student_id: int,
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Get scores for a specific student"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+        
+    student = db.query(StudentInDB).filter(StudentInDB.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+        
+    scores = db.query(ScoresInDB).filter(ScoresInDB.student_id == student_id).all()
+    
+    result = []
+    for score in scores:
+        result.append({
+            "id": score.id,
+            "teacher_name": score.teacher_name,
+            "subject_name": score.subject_name,
+            "actual_scores": score.actual_scores,
+            "predicted_scores": score.predicted_scores,
+            "danger_level": score.danger_level,
+            "delta_percentage": score.delta_percentage,
+            "semester": score.semester,
+            "academic_year": score.academic_year,
+            "created_at": score.created_at,
+            "updated_at": score.updated_at,
+            "student_id": score.student_id,
+            "grade_id": score.grade_id,
+            "previous_class_score": score.previous_class_score
+        })
+        
+    return result
 
 @router.post("/upload", response_model=ExcelUploadResponse)
 async def upload_excel_grades(
