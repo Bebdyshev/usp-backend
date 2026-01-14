@@ -610,6 +610,54 @@ async def delete_student(
     
     return {"message": "Student deleted successfully"}
 
+@router.get("/debug/students-grades", response_model=dict)
+async def debug_students_grades(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Debug endpoint to check student-grade relationships"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    # Get all grades with their student counts
+    grades = db.query(GradeInDB).all()
+    grades_info = []
+    for grade in grades:
+        student_count = db.query(func.count(StudentInDB.id)).filter(StudentInDB.grade_id == grade.id).scalar()
+        grades_info.append({
+            "id": grade.id,
+            "grade": grade.grade,
+            "parallel": grade.parallel,
+            "student_count_in_db": student_count,
+            "student_count_field": grade.student_count
+        })
+    
+    # Get all students with their grade_ids
+    students = db.query(StudentInDB).all()
+    students_info = []
+    for student in students:
+        grade_exists = db.query(GradeInDB).filter(GradeInDB.id == student.grade_id).first()
+        students_info.append({
+            "id": student.id,
+            "name": student.name,
+            "grade_id": student.grade_id,
+            "grade_exists": grade_exists is not None,
+            "grade_name": grade_exists.grade if grade_exists else None
+        })
+    
+    # Find orphan students (students with grade_id that doesn't exist)
+    orphan_students = [s for s in students_info if not s["grade_exists"]]
+    
+    return {
+        "total_grades": len(grades_info),
+        "total_students": len(students_info),
+        "orphan_students_count": len(orphan_students),
+        "grades": grades_info,
+        "students_sample": students_info[:20],  # First 20 students
+        "orphan_students": orphan_students
+    }
+
 @router.get("/subjects", response_model=List[str])
 async def get_subjects(
     token: str = Depends(oauth2_scheme),
