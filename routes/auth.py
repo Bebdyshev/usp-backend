@@ -139,12 +139,12 @@ def debug_all_data(db: Session = Depends(get_db)):
         grades_data = [{
             "id": grade.id,
             "grade": grade.grade,
-            "curatorName": grade.curatorName,
-            "createdAt": grade.createdAt.isoformat() if grade.createdAt else None,
+            "curator_name": grade.curator_name,
+            "created_at": grade.created_at.isoformat() if grade.created_at else None,
             "user_id": grade.user_id,
             "parallel": grade.parallel if hasattr(grade, 'parallel') else None,
             "shanyrak": grade.shanyrak if hasattr(grade, 'shanyrak') else None,
-            "studentcount": grade.studentcount if hasattr(grade, 'studentcount') else None
+            "student_count": grade.student_count if hasattr(grade, 'student_count') else None
         } for grade in grades]
 
         # Get all students

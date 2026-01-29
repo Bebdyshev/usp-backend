@@ -50,16 +50,15 @@ async def send_excel_as_csv_to_openai(
             raise HTTPException(status_code=404, detail="User not found")
 
         # Ищем класс по grade и curator
-        db_grade = db.query(GradeInDB).filter(GradeInDB.grade == grade, GradeInDB.curatorName == curator).first()
+        db_grade = db.query(GradeInDB).filter(GradeInDB.grade == grade, GradeInDB.curator_name == curator).first()
 
         if not db_grade:
             db_grade = GradeInDB(
                 grade=grade, 
-                curatorName=curator, 
+                curator_name=curator, 
                 user_id=user.id,
-                parallel=None,
-                shanyrak=None,
-                studentcount=0
+                parallel="",
+                student_count=0
             )
             db.add(db_grade)
             db.commit()
@@ -528,9 +527,9 @@ async def update_grade(
     # Update only the fields that are provided
     update_dict = update_data.dict(exclude_unset=True)
     
-    # Специальная обработка для studentCount -> studentcount
+    # Специальная обработка для studentCount -> student_count
     if "studentCount" in update_dict:
-        grade.studentcount = update_dict.pop("studentCount")
+        grade.student_count = update_dict.pop("studentCount")
     
     for key, value in update_dict.items():
         # Проверяем, что мы обновляем только существующие атрибуты
@@ -598,7 +597,7 @@ async def update_student_count(
         raise HTTPException(status_code=404, detail="Grade not found")
     
     # Update student count
-    grade.studentcount = student_count
+    grade.student_count = student_count
     
     db.commit()
     db.refresh(grade)
