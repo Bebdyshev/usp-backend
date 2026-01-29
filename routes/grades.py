@@ -715,14 +715,40 @@ async def get_parallels(
     parallel_list = [parallel[0] for parallel in parallels if parallel[0] is not None]
     
     return parallel_list
-
-@router.get("/students/{grade_id}", response_model=List[dict])
-async def get_students_by_grade(
+@router.get("/{grade_id}/subjects", response_model=List[str])
+async def get_grade_subjects(
     grade_id: int,
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
 ):
-    """Get all students in a specific grade"""
+    """Get all subjects available in a specific grade"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    # Check access
+    if not check_grade_access(user_data, grade_id, db):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # Get distinct subjects for this grade via students -> scores
+    # Join: Grade -> Student -> Score
+    subjects = db.query(ScoresInDB.subject_name).distinct() \
+        .join(StudentInDB, StudentInDB.id == ScoresInDB.student_id) \
+        .filter(StudentInDB.grade_id == grade_id) \
+        .filter(ScoresInDB.subject_name.isnot(None)) \
+        .all()
+    
+    return [s[0] for s in subjects]
+
+
+@router.get("/students/{grade_id}", response_model=List[dict])
+async def get_students_by_grade(
+    grade_id: int,
+    subject: Optional[str] = Query(None),
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Get all students in a specific grade with optional subject filtering"""
     user_data = verify_access_token(token)
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
@@ -739,68 +765,78 @@ async def get_students_by_grade(
 
     result = []
     for student in students:
-        # Get ALL scores for this student (across all subjects)
-        all_scores = db.query(ScoresInDB).filter(
-            ScoresInDB.student_id == student.id
-        ).all()
-
-        # Calculate overall average across all subjects
-        all_valid_scores = []
-        overall_danger_level = 0
-        danger_count = 0
-        
-        for score in all_scores:
-            if score.actual_scores and isinstance(score.actual_scores, list):
-                valid_scores = [s for s in score.actual_scores if s is not None and s > 0]
-                all_valid_scores.extend(valid_scores)
-            
-            if score.danger_level is not None:
-                overall_danger_level += score.danger_level
-                danger_count += 1
-        
-        # Calculate average percentage across all subjects
         average_percentage = None
-        if all_valid_scores:
-            average_percentage = round(sum(all_valid_scores) / len(all_valid_scores), 1)
-        
-        # Calculate average danger level
+        predicted_average = None
         danger_level = None
-        if danger_count > 0:
-            danger_level = round(overall_danger_level / danger_count)
-
-        # Get latest score for additional info
-        latest_score = db.query(ScoresInDB).filter(
-            ScoresInDB.student_id == student.id
-        ).order_by(ScoresInDB.updated_at.desc()).first()
-
-        previous_class_score = None
+        delta_percentage = None
+        subject_name = "Все" if not subject else subject
+        semester = None
         actual_scores = []
         predicted_scores = []
-        predicted_average = None
-        delta_percentage = None
-        subject_name = None
-        semester = None
+        previous_class_score = None
 
-        if latest_score:
-            try:
-                actual_list = latest_score.actual_scores or []
-                predicted_list = latest_score.predicted_scores or []
-                if isinstance(actual_list, list):
-                    valid_actual_scores = [s for s in actual_list if s is not None and s > 0]
-                    actual_scores = actual_list
-                if isinstance(predicted_list, list):
-                    predicted_scores = predicted_list
-                    num_completed = len(valid_actual_scores) if 'valid_actual_scores' in locals() else 0
-                    if num_completed > 0 and len(predicted_list) >= num_completed:
-                        predicted_average = round(sum(predicted_list[:num_completed]) / num_completed, 1)
-                    elif predicted_list:
-                        predicted_average = round(sum(predicted_list) / len(predicted_list), 1)
-            except Exception:
-                pass
-            previous_class_score = latest_score.previous_class_score
-            delta_percentage = latest_score.delta_percentage
-            subject_name = latest_score.subject_name
-            semester = latest_score.semester
+        if subject:
+            # Fetch specific subject score
+            score = db.query(ScoresInDB).filter(
+                ScoresInDB.student_id == student.id,
+                ScoresInDB.subject_name == subject
+            ).first()
+
+            if score:
+                actual_scores = score.actual_scores or []
+                predicted_scores = score.predicted_scores or []
+                previous_class_score = score.previous_class_score
+                delta_percentage = score.delta_percentage
+                danger_level = score.danger_level
+                subject_name = score.subject_name
+                semester = score.semester
+
+                # Calculate averages for this subject
+                valid_actual_scores = []
+                if isinstance(actual_scores, list):
+                    valid_actual_scores = [s for s in actual_scores if s is not None and s > 0]
+                    if valid_actual_scores:
+                        average_percentage = round(sum(valid_actual_scores) / len(valid_actual_scores), 1)
+                
+                if isinstance(predicted_scores, list):
+                     num_completed = len(valid_actual_scores)
+                     if num_completed > 0 and len(predicted_scores) >= num_completed:
+                         predicted_average = round(sum(predicted_scores[:num_completed]) / num_completed, 1)
+                     elif predicted_scores:
+                          predicted_average = round(sum(predicted_scores) / len(predicted_scores), 1)
+        else:
+            # Aggregated logic
+            all_scores = db.query(ScoresInDB).filter(
+                ScoresInDB.student_id == student.id
+            ).all()
+
+            all_valid_scores = []
+            overall_danger_level = 0
+            danger_count = 0
+            
+            for score in all_scores:
+                if score.actual_scores and isinstance(score.actual_scores, list):
+                    valid_scores = [s for s in score.actual_scores if s is not None and s > 0]
+                    all_valid_scores.extend(valid_scores)
+                
+                if score.danger_level is not None:
+                    overall_danger_level += score.danger_level
+                    danger_count += 1
+            
+            if all_valid_scores:
+                average_percentage = round(sum(all_valid_scores) / len(all_valid_scores), 1)
+            
+            if danger_count > 0:
+                danger_level = round(overall_danger_level / danger_count)
+
+            # Get latest score for displaying 'last_subject' if no subject filter is applied
+            latest_score = db.query(ScoresInDB).filter(
+                ScoresInDB.student_id == student.id
+            ).order_by(ScoresInDB.updated_at.desc()).first()
+            
+            if latest_score:
+                subject_name = latest_score.subject_name
+                semester = latest_score.semester
 
         result.append({
             "id": student.id,
