@@ -1,12 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, case
 from schemas.models import ScoresInDB, StudentInDB, GradeInDB
 from auth_utils import verify_access_token
 from routes.auth import oauth2_scheme
 from config import get_db 
 from role_utils import get_user_allowed_grade_ids
 import re
+
 
 router = APIRouter()
 
@@ -195,4 +196,188 @@ def get_class_danger_percentages(
 
     return {
         "class_danger_percentages": class_danger_result
+    }
+
+@router.get("/insights")
+def get_actionable_insights(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """
+    Get actionable insights for curators and admins:
+    - Top at-risk students requiring immediate attention
+    - Classes with declining performance
+    - Subject-level analysis
+    - Recommendations
+    """
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    allowed_grade_ids = get_user_allowed_grade_ids(user_data, db)
+    
+    # 1. Get top at-risk students (danger_level >= 2)
+    at_risk_query = db.query(
+        StudentInDB.id,
+        StudentInDB.name,
+        GradeInDB.grade,
+        GradeInDB.parallel,
+        func.avg(ScoresInDB.danger_level).label("avg_danger"),
+        func.avg(ScoresInDB.delta_percentage).label("avg_delta"),
+        func.count(ScoresInDB.id).label("subjects_count")
+    ).join(GradeInDB, StudentInDB.grade_id == GradeInDB.id) \
+     .join(ScoresInDB, ScoresInDB.student_id == StudentInDB.id)
+    
+    if allowed_grade_ids is not None:
+        if not allowed_grade_ids:
+            return {
+                "at_risk_students": [],
+                "problem_classes": [],
+                "subject_analysis": [],
+                "recommendations": [],
+                "summary": {"total_students": 0, "at_risk_count": 0, "critical_count": 0}
+            }
+        at_risk_query = at_risk_query.filter(GradeInDB.id.in_(allowed_grade_ids))
+    
+    at_risk_students = at_risk_query.group_by(
+        StudentInDB.id, StudentInDB.name, GradeInDB.grade, GradeInDB.parallel
+    ).having(func.avg(ScoresInDB.danger_level) >= 2) \
+     .order_by(func.avg(ScoresInDB.danger_level).desc()) \
+     .limit(10).all()
+    
+    at_risk_list = [{
+        "id": s.id,
+        "name": s.name,
+        "class": f"{s.grade} {s.parallel}" if s.parallel else s.grade,
+        "avg_danger_level": round(float(s.avg_danger), 1),
+        "avg_delta_percentage": round(float(s.avg_delta), 1) if s.avg_delta else 0,
+        "subjects_affected": s.subjects_count,
+        "priority": "critical" if s.avg_danger >= 2.5 else "high"
+    } for s in at_risk_students]
+    
+    # 2. Problem classes (classes with highest average danger)
+    problem_classes_query = db.query(
+        GradeInDB.id,
+        GradeInDB.grade,
+        GradeInDB.parallel,
+        GradeInDB.curator_name,
+        func.count(StudentInDB.id.distinct()).label("student_count"),
+        func.avg(ScoresInDB.danger_level).label("avg_danger"),
+        func.sum(case((ScoresInDB.danger_level >= 2, 1), else_=0)).label("at_risk_count")
+    ).join(StudentInDB, StudentInDB.grade_id == GradeInDB.id) \
+     .join(ScoresInDB, ScoresInDB.student_id == StudentInDB.id)
+    
+    if allowed_grade_ids is not None:
+        problem_classes_query = problem_classes_query.filter(GradeInDB.id.in_(allowed_grade_ids))
+    
+    problem_classes = problem_classes_query.group_by(
+        GradeInDB.id, GradeInDB.grade, GradeInDB.parallel, GradeInDB.curator_name
+    ).having(func.avg(ScoresInDB.danger_level) >= 1.5) \
+     .order_by(func.avg(ScoresInDB.danger_level).desc()) \
+     .limit(5).all()
+    
+    problem_classes_list = [{
+        "id": c.id,
+        "class": f"{c.grade} {c.parallel}" if c.parallel else c.grade,
+        "curator": c.curator_name or "Не назначен",
+        "student_count": c.student_count,
+        "avg_danger_level": round(float(c.avg_danger), 2),
+        "at_risk_students": int(c.at_risk_count) if c.at_risk_count else 0,
+        "attention_needed": "immediate" if c.avg_danger >= 2 else "monitor"
+    } for c in problem_classes]
+    
+    # 3. Subject analysis - which subjects have most problems
+    subject_query = db.query(
+        ScoresInDB.subject_name,
+        func.count(ScoresInDB.id).label("total_scores"),
+        func.avg(ScoresInDB.danger_level).label("avg_danger"),
+        func.avg(ScoresInDB.delta_percentage).label("avg_delta"),
+        func.sum(case((ScoresInDB.danger_level >= 2, 1), else_=0)).label("problem_count")
+    )
+    
+    if allowed_grade_ids is not None:
+        subject_query = subject_query.filter(ScoresInDB.grade_id.in_(allowed_grade_ids))
+    
+    subject_stats = subject_query.filter(ScoresInDB.subject_name.isnot(None)) \
+     .group_by(ScoresInDB.subject_name) \
+     .order_by(func.avg(ScoresInDB.danger_level).desc()).all()
+    
+    subject_analysis = [{
+        "subject": s.subject_name,
+        "students_count": s.total_scores,
+        "avg_danger_level": round(float(s.avg_danger), 2) if s.avg_danger else 0,
+        "avg_performance_gap": round(float(s.avg_delta), 1) if s.avg_delta else 0,
+        "problem_students": int(s.problem_count) if s.problem_count else 0,
+        "status": "critical" if (s.avg_danger or 0) >= 2 else "warning" if (s.avg_danger or 0) >= 1.5 else "ok"
+    } for s in subject_stats]
+    
+    # 4. Generate recommendations
+    recommendations = []
+    
+    if at_risk_list:
+        critical_count = len([s for s in at_risk_list if s["priority"] == "critical"])
+        if critical_count > 0:
+            recommendations.append({
+                "type": "urgent",
+                "title": "Критические случаи",
+                "description": f"{critical_count} студентов требуют немедленного внимания. Рекомендуется связаться с родителями и организовать дополнительные занятия.",
+                "action": "Просмотреть список студентов",
+                "link": "/dashboard/students?danger=3"
+            })
+    
+    if problem_classes_list:
+        recommendations.append({
+            "type": "warning", 
+            "title": "Проблемные классы",
+            "description": f"Обнаружено {len(problem_classes_list)} классов с повышенным уровнем риска. Необходимо проанализировать причины и разработать план коррекции.",
+            "action": "Анализировать классы",
+            "link": "/dashboard/classes"
+        })
+    
+    # Subject-specific recommendations
+    problem_subjects = [s for s in subject_analysis if s["status"] in ["critical", "warning"]]
+    if problem_subjects:
+        worst_subject = problem_subjects[0]
+        recommendations.append({
+            "type": "info",
+            "title": f"Предмет требует внимания: {worst_subject['subject']}",
+            "description": f"По предмету '{worst_subject['subject']}' средний уровень риска {worst_subject['avg_danger_level']}. {worst_subject['problem_students']} студентов испытывают трудности.",
+            "action": "Провести анализ",
+            "link": None
+        })
+    
+    if not recommendations:
+        recommendations.append({
+            "type": "success",
+            "title": "Всё под контролем",
+            "description": "На данный момент критических проблем не обнаружено. Продолжайте мониторинг успеваемости.",
+            "action": None,
+            "link": None
+        })
+    
+    # 5. Summary stats
+    total_query = db.query(func.count(StudentInDB.id.distinct()))
+    if allowed_grade_ids is not None:
+        total_query = total_query.filter(StudentInDB.grade_id.in_(allowed_grade_ids))
+    total_students = total_query.scalar() or 0
+    
+    at_risk_count_query = db.query(func.count(StudentInDB.id.distinct())) \
+        .join(ScoresInDB, ScoresInDB.student_id == StudentInDB.id)
+    if allowed_grade_ids is not None:
+        at_risk_count_query = at_risk_count_query.filter(StudentInDB.grade_id.in_(allowed_grade_ids))
+    # Count students with any danger level >= 2
+    at_risk_total = at_risk_count_query.filter(ScoresInDB.danger_level >= 2).scalar() or 0
+    critical_total = at_risk_count_query.filter(ScoresInDB.danger_level >= 3).scalar() or 0
+    
+    return {
+        "at_risk_students": at_risk_list,
+        "problem_classes": problem_classes_list,
+        "subject_analysis": subject_analysis,
+        "recommendations": recommendations,
+        "summary": {
+            "total_students": total_students,
+            "at_risk_count": at_risk_total,
+            "critical_count": critical_total,
+            "at_risk_percentage": round((at_risk_total / total_students * 100), 1) if total_students > 0 else 0
+        }
     }
