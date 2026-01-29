@@ -5,6 +5,7 @@ from schemas.models import ScoresInDB, StudentInDB, GradeInDB
 from auth_utils import verify_access_token
 from routes.auth import oauth2_scheme
 from config import get_db 
+from role_utils import get_user_allowed_grade_ids
 import re
 
 router = APIRouter()
@@ -18,21 +19,42 @@ def get_danger_level_stats(
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-    # Fetch all scores with student_id and danger_level
-    scores_data = db.query(ScoresInDB.student_id, ScoresInDB.danger_level).all()
+    # Get allowed grade IDs for the current user
+    allowed_grade_ids = get_user_allowed_grade_ids(user_data, db)
+    
+    # Build query for scores - filter by allowed grades if not admin
+    scores_query = db.query(ScoresInDB.student_id, ScoresInDB.danger_level, ScoresInDB.grade_id)
+    if allowed_grade_ids is not None:  # Not admin
+        if not allowed_grade_ids:  # Empty set - no access
+            return {
+                "danger_level_stats": {
+                    0: {"student_count": 0, "avg_delta_percentage": 0},
+                    1: {"student_count": 0, "avg_delta_percentage": 0},
+                    2: {"student_count": 0, "avg_delta_percentage": 0},
+                    3: {"student_count": 0, "avg_delta_percentage": 0},
+                    "total_students": 0,
+                    "avg_danger_level": 0
+                },
+                "all_dangerous_classes": []
+            }
+        scores_query = scores_query.filter(ScoresInDB.grade_id.in_(allowed_grade_ids))
+    
+    scores_data = scores_query.all()
 
     # Group by student
     student_danger_sums = {}
     student_danger_counts = {}
 
-    for student_id, danger_level in scores_data:
+    for student_id, danger_level, grade_id in scores_data:
         if danger_level is not None:
             student_danger_sums[student_id] = student_danger_sums.get(student_id, 0) + danger_level
             student_danger_counts[student_id] = student_danger_counts.get(student_id, 0) + 1
     
-    # Get all student IDs to handle those with no scores
-    all_student_ids = db.query(StudentInDB.id).all()
-    all_student_ids = set(s[0] for s in all_student_ids)
+    # Get student IDs filtered by allowed grades
+    students_query = db.query(StudentInDB.id)
+    if allowed_grade_ids is not None:
+        students_query = students_query.filter(StudentInDB.grade_id.in_(allowed_grade_ids))
+    all_student_ids = set(s[0] for s in students_query.all())
     
     danger_counts = {0: 0, 1: 0, 2: 0, 3: 0}
     total_danger_sum = 0
@@ -62,21 +84,16 @@ def get_danger_level_stats(
     danger_level_stats["avg_danger_level"] = round(total_danger_sum / students_with_danger, 2) if students_with_danger > 0 else 0
 
     # Query to get all dangerous classes ordered by average danger level
-    # We need to recalculate this too to be consistent, but for now let's keep the query 
-    # or update it to use the same logic if possible. 
-    # The original query was:
-    # dangerous_classes = db.query(GradeInDB.grade, func.avg(ScoresInDB.danger_level)...)
-    # This is also averaging per score, which might be slightly off but acceptable for "average danger of class".
-    # However, "average danger of class" usually means "average of (average danger of student)".
-    # Let's leave the dangerous_classes query as is for now to minimize changes, 
-    # as the user specifically complained about the counts.
-    
-    dangerous_classes = db.query(
+    dangerous_classes_query = db.query(
         GradeInDB.grade,
         func.avg(ScoresInDB.danger_level).label("avg_danger_level")
     ).join(StudentInDB, StudentInDB.grade_id == GradeInDB.id) \
-     .join(ScoresInDB, ScoresInDB.student_id == StudentInDB.id) \
-     .group_by(GradeInDB.grade) \
+     .join(ScoresInDB, ScoresInDB.student_id == StudentInDB.id)
+    
+    if allowed_grade_ids is not None:
+        dangerous_classes_query = dangerous_classes_query.filter(GradeInDB.id.in_(allowed_grade_ids))
+    
+    dangerous_classes = dangerous_classes_query.group_by(GradeInDB.grade) \
      .order_by(func.avg(ScoresInDB.danger_level).desc()).all()
 
     all_dangerous_classes = [
@@ -98,11 +115,27 @@ def get_class_danger_percentages(
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-    total_students_by_class = db.query(
+    # Get allowed grade IDs for the current user
+    allowed_grade_ids = get_user_allowed_grade_ids(user_data, db)
+
+    # Build base query with optional filtering
+    total_students_query = db.query(
         GradeInDB.grade,
         func.count(StudentInDB.id)
-    ).join(StudentInDB, StudentInDB.grade_id == GradeInDB.id) \
-     .group_by(GradeInDB.grade).all()
+    ).join(StudentInDB, StudentInDB.grade_id == GradeInDB.id)
+    
+    if allowed_grade_ids is not None:
+        if not allowed_grade_ids:  # Empty set - no access
+            return {
+                "class_danger_percentages": [],
+                "overall_danger_summary": {
+                    "total_danger_students": 0,
+                    "percentage_of_all_students": 0.00
+                }
+            }
+        total_students_query = total_students_query.filter(GradeInDB.id.in_(allowed_grade_ids))
+    
+    total_students_by_class = total_students_query.group_by(GradeInDB.grade).all()
 
     total_students_dict = {grade: count for grade, count in total_students_by_class}
     total_students = sum(total_students_dict.values())
@@ -116,13 +149,17 @@ def get_class_danger_percentages(
             }
         }
 
-    class_danger_stats = db.query(
+    class_danger_query = db.query(
         GradeInDB.grade,
         ScoresInDB.danger_level,
         func.count(ScoresInDB.student_id).label("student_count")
     ).join(StudentInDB, StudentInDB.grade_id == GradeInDB.id) \
-     .join(ScoresInDB, ScoresInDB.student_id == StudentInDB.id) \
-     .group_by(GradeInDB.grade, ScoresInDB.danger_level) \
+     .join(ScoresInDB, ScoresInDB.student_id == StudentInDB.id)
+    
+    if allowed_grade_ids is not None:
+        class_danger_query = class_danger_query.filter(GradeInDB.id.in_(allowed_grade_ids))
+    
+    class_danger_stats = class_danger_query.group_by(GradeInDB.grade, ScoresInDB.danger_level) \
      .order_by(GradeInDB.grade, ScoresInDB.danger_level).all()
 
     class_percentages = {}
