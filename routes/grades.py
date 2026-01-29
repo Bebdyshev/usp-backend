@@ -6,6 +6,7 @@ from schemas.models import *
 from sqlalchemy import or_
 from auth_utils import verify_access_token
 from routes.auth import oauth2_scheme
+from role_utils import get_user_allowed_grade_ids, check_grade_access
 import pandas as pd
 from io import BytesIO, StringIO
 from services.analyze import analyze_excel
@@ -305,13 +306,22 @@ async def get_all_grades(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
 ):
-    """Get information about all grades/classes"""
+    """Get information about all grades/classes (filtered by user role)"""
     user_data = verify_access_token(token)
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     
-    # Get all grades
-    grades = db.query(GradeInDB).all()
+    # Get allowed grade IDs for role-based filtering
+    allowed_grade_ids = get_user_allowed_grade_ids(user_data, db)
+    
+    # Build query with optional filtering
+    grades_query = db.query(GradeInDB)
+    if allowed_grade_ids is not None:  # Not admin
+        if not allowed_grade_ids:  # Empty set - no access
+            return []
+        grades_query = grades_query.filter(GradeInDB.id.in_(allowed_grade_ids))
+    
+    grades = grades_query.all()
     
     result = []
     for grade in grades:
@@ -440,6 +450,10 @@ async def get_grade_by_id(
     user_data = verify_access_token(token)
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    # Check role-based access
+    if not check_grade_access(user_data, grade_id, db):
+        raise HTTPException(status_code=403, detail="You don't have access to this grade")
     
     grade = db.query(GradeInDB).filter(GradeInDB.id == grade_id).first()
     if not grade:
@@ -700,6 +714,10 @@ async def get_students_by_grade(
     user_data = verify_access_token(token)
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    # Check role-based access
+    if not check_grade_access(user_data, grade_id, db):
+        raise HTTPException(status_code=403, detail="You don't have access to this grade")
     
     grade = db.query(GradeInDB).filter(GradeInDB.id == grade_id).first()
     if not grade:
