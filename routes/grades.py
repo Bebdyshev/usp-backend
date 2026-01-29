@@ -107,14 +107,16 @@ async def send_excel_as_csv_to_openai(
                 db.commit()
                 db.refresh(db_student)
 
-            # Обновляем или создаем запись с оценками
-            db_score = db.query(ScoresInDB).filter(ScoresInDB.student_id == db_student.id).first()
+            # Обновляем или создаем запись с оценками ПО ПРЕДМЕТУ
+            db_score = db.query(ScoresInDB).filter(
+                ScoresInDB.student_id == db_student.id,
+                ScoresInDB.subject_name == subject
+            ).first()
             if db_score:
                 db_score.actual_scores = actual_score
                 db_score.predicted_scores = predicted_scores
                 db_score.danger_level = danger_level
                 db_score.delta_percentage = round(percentage_difference, 1)
-                db_score.subject_name = subject
             else:
                 new_score = ScoresInDB(
                     subject_name=subject,
@@ -123,6 +125,7 @@ async def send_excel_as_csv_to_openai(
                     danger_level=danger_level,
                     delta_percentage=round(percentage_difference, 1),
                     student_id=db_student.id,
+                    grade_id=db_grade.id,
                 )
                 print(new_score)
 
@@ -146,14 +149,20 @@ def get_class_data(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
         if not user_data:
             raise HTTPException(status_code=401, detail="Invalid or expired token")
         
-        user = db.query(UserInDB).filter(UserInDB.email == user_data["sub"]).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-
-        db_grades = db.query(GradeInDB).filter(GradeInDB.user_id == user.id).all()
+        # Get allowed grade IDs for role-based filtering
+        allowed_grade_ids = get_user_allowed_grade_ids(user_data, db)
+        
+        # Build query with role-based filtering
+        grades_query = db.query(GradeInDB)
+        if allowed_grade_ids is not None:  # Not admin
+            if not allowed_grade_ids:  # Empty set - no access
+                return {"class_data": []}
+            grades_query = grades_query.filter(GradeInDB.id.in_(allowed_grade_ids))
+        
+        db_grades = grades_query.all()
         
         if not db_grades:
-            raise HTTPException(status_code=404, detail="No grades found for the user")
+            return {"class_data": []}
 
         class_data = []
         
@@ -248,14 +257,19 @@ def get_students_by_danger_level(
         if not user_data:
             raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-        user = db.query(UserInDB).filter(UserInDB.email == user_data["sub"]).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-
-        # Получаем все классы пользователя
-        db_grades = db.query(GradeInDB).filter(GradeInDB.user_id == user.id).all()
+        # Get allowed grade IDs for role-based filtering
+        allowed_grade_ids = get_user_allowed_grade_ids(user_data, db)
+        
+        # Build query with role-based filtering
+        grades_query = db.query(GradeInDB)
+        if allowed_grade_ids is not None:  # Not admin
+            if not allowed_grade_ids:  # Empty set - no access
+                return {"filtered_class_data": []}
+            grades_query = grades_query.filter(GradeInDB.id.in_(allowed_grade_ids))
+        
+        db_grades = grades_query.all()
         if not db_grades:
-            raise HTTPException(status_code=404, detail="No grades found for the user")
+            return {"filtered_class_data": []}
 
         class_data = []
 
@@ -285,7 +299,7 @@ def get_students_by_danger_level(
             
             if student_info_list:
                 class_data.append({
-                    "curator_name": grade.curatorName,
+                    "curator_name": grade.curator_name,
                     "subject_name": subject_name,
                     "grade_liter": grade.grade,
                     "class": student_info_list
@@ -532,9 +546,8 @@ async def update_grade(
         "id": grade.id,
         "grade": grade.grade,
         "parallel": grade.parallel,
-        "curatorName": grade.curatorName,
-        "shanyrak": grade.shanyrak,
-        "studentcount": grade.studentcount
+        "curator_name": grade.curator_name,
+        "student_count": grade.student_count
     })
     
     return {"message": "Grade updated successfully"}
