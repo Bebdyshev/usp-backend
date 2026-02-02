@@ -1080,6 +1080,231 @@ async def get_student_scores(
         
     return result
 
+@router.put("/scores/{score_id}", status_code=status.HTTP_200_OK)
+async def update_score(
+    score_id: int,
+    update_data: UpdateScore,
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Update a score by ID - for admins or assigned teachers"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    score = db.query(ScoresInDB).filter(ScoresInDB.id == score_id).first()
+    if not score:
+        raise HTTPException(status_code=404, detail="Score not found")
+    
+    user_type = user_data.get("type")
+    user_id = user_data.get("user_id")
+    
+    # Check permissions
+    if user_type == "admin":
+        # Admins can edit any score
+        pass
+    elif user_type == "teacher":
+        # Teachers can only edit scores for their assigned subjects/groups
+        assignment = db.query(TeacherAssignmentInDB).filter(
+            TeacherAssignmentInDB.teacher_id == user_id,
+            TeacherAssignmentInDB.subject_id == score.subject_id,
+            TeacherAssignmentInDB.is_active == 1,
+            or_(
+                TeacherAssignmentInDB.grade_id == score.grade_id,
+                TeacherAssignmentInDB.grade_id == None
+            )
+        ).first()
+        
+        if not assignment:
+            # Check if they have subgroup assignment
+            if score.subgroup_id:
+                assignment = db.query(TeacherAssignmentInDB).filter(
+                    TeacherAssignmentInDB.teacher_id == user_id,
+                    TeacherAssignmentInDB.subject_id == score.subject_id,
+                    TeacherAssignmentInDB.subgroup_id == score.subgroup_id,
+                    TeacherAssignmentInDB.is_active == 1
+                ).first()
+        
+        if not assignment:
+            raise HTTPException(status_code=403, detail="You don't have permission to edit this score")
+    else:
+        raise HTTPException(status_code=403, detail="Only admins and teachers can edit scores")
+    
+    # Update only provided fields
+    update_dict = update_data.dict(exclude_unset=True)
+    
+    for key, value in update_dict.items():
+        if hasattr(score, key):
+            setattr(score, key, value)
+    
+    # Recalculate danger level if actual_scores changed
+    if 'actual_scores' in update_dict and score.actual_scores:
+        actual = score.actual_scores
+        predicted = score.predicted_scores or {}
+        
+        # Calculate average of actual scores
+        actual_values = [v for v in actual.values() if isinstance(v, (int, float))]
+        predicted_values = [v for v in predicted.values() if isinstance(v, (int, float))]
+        
+        if actual_values:
+            avg_actual = sum(actual_values) / len(actual_values)
+            avg_predicted = sum(predicted_values) / len(predicted_values) if predicted_values else avg_actual
+            
+            delta = avg_actual - avg_predicted
+            score.delta_percentage = round(delta, 2)
+            
+            # Calculate danger level based on delta
+            if delta >= -5:
+                score.danger_level = 0  # Low risk
+            elif delta >= -15:
+                score.danger_level = 1  # Moderate risk
+            elif delta >= -25:
+                score.danger_level = 2  # High risk
+            else:
+                score.danger_level = 3  # Critical
+    
+    db.commit()
+    db.refresh(score)
+    
+    return {
+        "message": "Score updated successfully",
+        "score": {
+            "id": score.id,
+            "teacher_name": score.teacher_name,
+            "subject_name": score.subject_name,
+            "actual_scores": score.actual_scores,
+            "predicted_scores": score.predicted_scores,
+            "danger_level": score.danger_level,
+            "delta_percentage": score.delta_percentage,
+            "student_id": score.student_id,
+            "grade_id": score.grade_id
+        }
+    }
+
+@router.get("/teacher/my-assignments")
+async def get_teacher_assignments(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Get assignments for the current teacher"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    user_id = user_data.get("user_id")
+    user_type = user_data.get("type")
+    
+    if user_type not in ["teacher", "admin"]:
+        raise HTTPException(status_code=403, detail="Only teachers can access this endpoint")
+    
+    assignments = db.query(TeacherAssignmentInDB).filter(
+        TeacherAssignmentInDB.teacher_id == user_id,
+        TeacherAssignmentInDB.is_active == 1
+    ).all()
+    
+    result = []
+    for assignment in assignments:
+        subject = db.query(SubjectInDB).filter(SubjectInDB.id == assignment.subject_id).first()
+        grade = db.query(GradeInDB).filter(GradeInDB.id == assignment.grade_id).first() if assignment.grade_id else None
+        subgroup = db.query(SubgroupInDB).filter(SubgroupInDB.id == assignment.subgroup_id).first() if assignment.subgroup_id else None
+        
+        result.append({
+            "id": assignment.id,
+            "subject_id": assignment.subject_id,
+            "subject_name": subject.name if subject else None,
+            "grade_id": assignment.grade_id,
+            "grade_name": grade.grade if grade else "Все классы",
+            "subgroup_id": assignment.subgroup_id,
+            "subgroup_name": subgroup.name if subgroup else None
+        })
+    
+    return result
+
+@router.get("/teacher/students")
+async def get_teacher_students(
+    subject_id: int = Query(...),
+    grade_id: Optional[int] = Query(None),
+    subgroup_id: Optional[int] = Query(None),
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Get students that a teacher can grade for a specific subject/grade/subgroup"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    user_id = user_data.get("user_id")
+    user_type = user_data.get("type")
+    
+    # Check if teacher has assignment for this subject/grade/subgroup
+    if user_type == "teacher":
+        assignment_query = db.query(TeacherAssignmentInDB).filter(
+            TeacherAssignmentInDB.teacher_id == user_id,
+            TeacherAssignmentInDB.subject_id == subject_id,
+            TeacherAssignmentInDB.is_active == 1
+        )
+        
+        if grade_id:
+            assignment_query = assignment_query.filter(
+                or_(
+                    TeacherAssignmentInDB.grade_id == grade_id,
+                    TeacherAssignmentInDB.grade_id == None
+                )
+            )
+        
+        if subgroup_id:
+            assignment_query = assignment_query.filter(
+                or_(
+                    TeacherAssignmentInDB.subgroup_id == subgroup_id,
+                    TeacherAssignmentInDB.subgroup_id == None
+                )
+            )
+        
+        assignment = assignment_query.first()
+        if not assignment:
+            raise HTTPException(status_code=403, detail="You don't have permission to view these students")
+    elif user_type != "admin":
+        raise HTTPException(status_code=403, detail="Only teachers and admins can access this endpoint")
+    
+    # Get students based on filters
+    student_query = db.query(StudentInDB).filter(StudentInDB.is_active == 1)
+    
+    if grade_id:
+        student_query = student_query.filter(StudentInDB.grade_id == grade_id)
+    
+    if subgroup_id:
+        student_query = student_query.filter(StudentInDB.subgroup_id == subgroup_id)
+    
+    students = student_query.all()
+    
+    # Get subject info
+    subject = db.query(SubjectInDB).filter(SubjectInDB.id == subject_id).first()
+    
+    result = []
+    for student in students:
+        # Get existing score for this student and subject
+        score = db.query(ScoresInDB).filter(
+            ScoresInDB.student_id == student.id,
+            ScoresInDB.subject_id == subject_id
+        ).first()
+        
+        grade = db.query(GradeInDB).filter(GradeInDB.id == student.grade_id).first()
+        
+        result.append({
+            "id": student.id,
+            "name": student.name,
+            "grade_id": student.grade_id,
+            "grade_name": grade.grade if grade else None,
+            "subgroup_id": student.subgroup_id,
+            "score_id": score.id if score else None,
+            "actual_scores": score.actual_scores if score else None,
+            "predicted_scores": score.predicted_scores if score else None,
+            "danger_level": score.danger_level if score else None,
+            "subject_name": subject.name if subject else None
+        })
+    
+    return result
+
 @router.post("/upload", response_model=ExcelUploadResponse)
 async def upload_excel_grades(
     grade_id: int = Form(...),
