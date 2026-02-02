@@ -1359,13 +1359,39 @@ async def upload_excel_grades(
     Optional: semester (default 1), subgroup_id
     """
     try:
-        # Verify admin access
+        # Verify access (admin or teacher)
         user_data = verify_access_token(token)
         if not user_data:
             raise HTTPException(status_code=401, detail="Invalid or expired token")
         
-        if user_data.get("type") != "admin":
-            raise HTTPException(status_code=403, detail="Only admins can upload grades")
+        user_type = user_data.get("type")
+        user_email = user_data.get("sub")
+        
+        if user_type not in ["admin", "teacher"]:
+            raise HTTPException(status_code=403, detail="Only admins and teachers can upload grades")
+        
+        # Get user_id for teacher permission check
+        user = db.query(UserInDB).filter(UserInDB.email == user_email).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # If teacher, check if they have assignment for this subject/grade
+        if user_type == "teacher":
+            assignment = db.query(TeacherAssignmentInDB).filter(
+                TeacherAssignmentInDB.teacher_id == user.id,
+                TeacherAssignmentInDB.subject_id == subject_id,
+                TeacherAssignmentInDB.is_active == 1,
+                or_(
+                    TeacherAssignmentInDB.grade_id == grade_id,
+                    TeacherAssignmentInDB.grade_id == None
+                )
+            ).first()
+            
+            if not assignment:
+                raise HTTPException(
+                    status_code=403, 
+                    detail="You don't have permission to upload grades for this subject and class"
+                )
         
         # Validate file type
         if not file.filename.lower().endswith(('.xlsx', '.xls')):
