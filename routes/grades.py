@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Body, Query, status
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from config import get_db
@@ -685,6 +686,31 @@ async def get_students_by_grade(
 
     return [enrich_student_data(student, db, subject) for student in students]
 
+@router.get("/template")
+async def download_excel_template(
+    token: str = Depends(oauth2_scheme)
+):
+    """Download Excel template for grade upload"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    # Allow both admin and teacher to download template
+    if user_data.get("type") not in ["admin", "teacher"]:
+        raise HTTPException(status_code=403, detail="Only admins and teachers can download template")
+    
+    try:
+        template_content = generate_excel_template()
+        
+        return Response(
+            content=template_content,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "attachment; filename=grades_template.xlsx"}
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating template: {str(e)}")
+
 @router.get("/{grade_id}", response_model=dict)
 async def get_grade_by_id(
     grade_id: int,
@@ -1208,6 +1234,140 @@ async def update_score(
         }
     }
 
+@router.post("/scores", status_code=status.HTTP_201_CREATED)
+async def create_score(
+    student_id: int = Body(...),
+    subject_id: int = Body(...),
+    actual_scores: dict = Body(default=None),
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Create a new score record for a student - for admins or assigned teachers"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    # Get student
+    student = db.query(StudentInDB).filter(StudentInDB.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    
+    # Get subject
+    subject = db.query(SubjectInDB).filter(SubjectInDB.id == subject_id).first()
+    if not subject:
+        raise HTTPException(status_code=404, detail="Subject not found")
+    
+    user_type = user_data.get("type")
+    user_email = user_data.get("sub")
+    
+    # Get user_id from email
+    user = db.query(UserInDB).filter(UserInDB.email == user_email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Check permissions
+    if user_type == "admin":
+        # Admins can create any score
+        teacher_name = user.name or user.email
+    elif user_type == "teacher":
+        # Teachers can only create scores for their assigned subjects/groups
+        assignment = db.query(TeacherAssignmentInDB).filter(
+            TeacherAssignmentInDB.teacher_id == user.id,
+            TeacherAssignmentInDB.subject_id == subject_id,
+            TeacherAssignmentInDB.is_active == 1,
+            or_(
+                TeacherAssignmentInDB.grade_id == student.grade_id,
+                TeacherAssignmentInDB.grade_id == None
+            )
+        ).first()
+        
+        if not assignment:
+            raise HTTPException(status_code=403, detail="You don't have permission to create scores for this student/subject")
+        
+        teacher_name = user.name or user.email
+    else:
+        raise HTTPException(status_code=403, detail="Only admins and teachers can create scores")
+    
+    # Check if score already exists
+    existing_score = db.query(ScoresInDB).filter(
+        ScoresInDB.student_id == student_id,
+        ScoresInDB.subject_id == subject_id,
+        ScoresInDB.grade_id == student.grade_id
+    ).first()
+    
+    if existing_score:
+        # If score exists, update it instead of creating new
+        scores_list = [0.0, 0.0, 0.0, 0.0]
+        if actual_scores:
+            for i in range(1, 5):
+                key = f'q{i}'
+                val = actual_scores.get(key, 0)
+                scores_list[i-1] = float(val) if val is not None else 0.0
+        
+        existing_score.actual_scores = scores_list
+        existing_score.teacher_name = teacher_name
+        db.commit()
+        db.refresh(existing_score)
+        
+        return {
+            "message": "Score updated successfully",
+            "score": {
+                "id": existing_score.id,
+                "teacher_name": existing_score.teacher_name,
+                "subject_name": existing_score.subject_name,
+                "actual_scores": existing_score.actual_scores,
+                "predicted_scores": existing_score.predicted_scores,
+                "danger_level": existing_score.danger_level,
+                "delta_percentage": existing_score.delta_percentage,
+                "student_id": existing_score.student_id,
+                "grade_id": existing_score.grade_id,
+                "subject_id": existing_score.subject_id
+            }
+        }
+    
+    # Convert actual_scores dict to list
+    scores_list = [0.0, 0.0, 0.0, 0.0]
+    if actual_scores:
+        for i in range(1, 5):
+            key = f'q{i}'
+            val = actual_scores.get(key, 0)
+            scores_list[i-1] = float(val) if val is not None else 0.0
+    
+    # Create new score
+    new_score = ScoresInDB(
+        teacher_name=teacher_name,
+        subject_name=subject.name,
+        subject_id=subject_id,
+        student_id=student_id,
+        grade_id=student.grade_id,
+        actual_scores=scores_list,
+        predicted_scores=[0.0, 0.0, 0.0, 0.0],
+        danger_level=0,
+        delta_percentage=0.0,
+        semester=1,
+        academic_year="2024-2025"
+    )
+    
+    db.add(new_score)
+    db.commit()
+    db.refresh(new_score)
+    
+    return {
+        "message": "Score created successfully",
+        "score": {
+            "id": new_score.id,
+            "teacher_name": new_score.teacher_name,
+            "subject_name": new_score.subject_name,
+            "actual_scores": new_score.actual_scores,
+            "predicted_scores": new_score.predicted_scores,
+            "danger_level": new_score.danger_level,
+            "delta_percentage": new_score.delta_percentage,
+            "student_id": new_score.student_id,
+            "grade_id": new_score.grade_id,
+            "subject_id": new_score.subject_id
+        }
+    }
+
 @router.get("/teacher/my-assignments")
 async def get_teacher_assignments(
     token: str = Depends(oauth2_scheme),
@@ -1596,28 +1756,4 @@ async def upload_excel_grades(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An error occurred during upload: {str(e)}")
 
-@router.get("/template")
-async def download_excel_template(
-    token: str = Depends(oauth2_scheme)
-):
-    """Download Excel template for grade upload"""
-    user_data = verify_access_token(token)
-    if not user_data:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
-    if user_data.get("type") != "admin":
-        raise HTTPException(status_code=403, detail="Only admins can download template")
-    
-    try:
-        template_content = generate_excel_template()
-        
-        from fastapi.responses import Response
-        
-        return Response(
-            content=template_content,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": "attachment; filename=grades_template.xlsx"}
-        )
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error generating template: {str(e)}")
+
