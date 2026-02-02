@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import func, case
 from schemas.models import ScoresInDB, StudentInDB, GradeInDB
@@ -200,6 +201,8 @@ def get_class_danger_percentages(
 
 @router.get("/insights")
 def get_actionable_insights(
+    class_level: Optional[str] = Query(None, description="Class level e.g. '8', '10'"),
+    grade_id: Optional[int] = Query(None, description="Specific grade ID"),
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
 ):
@@ -215,6 +218,27 @@ def get_actionable_insights(
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     allowed_grade_ids = get_user_allowed_grade_ids(user_data, db)
+
+    # --- FILTERING ---
+    # Apply Filters to allowed_grade_ids
+    current_grades_query = db.query(GradeInDB)
+    
+    if allowed_grade_ids is not None:
+        current_grades_query = current_grades_query.filter(GradeInDB.id.in_(allowed_grade_ids))
+    
+    if grade_id:
+        current_grades_query = current_grades_query.filter(GradeInDB.id == grade_id)
+        
+    if class_level:
+        current_grades_query = current_grades_query.filter(
+             (GradeInDB.grade == class_level) | 
+             (GradeInDB.grade.like(f"{class_level} %")) | 
+             (GradeInDB.grade.like(f"{class_level}_%"))
+        )
+    
+    filtered_grades_objs = current_grades_query.all()
+    # IMPORTANT: Overwrite allowed_grade_ids with the filtered list
+    allowed_grade_ids = [g.id for g in filtered_grades_objs]
     
     # 1. Get top at-risk students (danger_level >= 2)
     at_risk_query = db.query(

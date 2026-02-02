@@ -453,6 +453,235 @@ async def create_grade(
     
     return {"id": db_grade.id, "message": "Grade created successfully"}
 
+@router.get("/subjects", response_model=List[str])
+async def get_subjects(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Get list of all unique subjects"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    # Get unique subjects from scores table
+    subjects = db.query(ScoresInDB.subject_name).distinct().all()
+    subject_list = [subject[0] for subject in subjects if subject[0] is not None]
+    
+    return subject_list
+
+@router.get("/parallels", response_model=List[str])
+async def get_parallels(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Get list of all unique parallels/grades"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    # Get unique grades from grades table
+    parallels = db.query(GradeInDB.grade).distinct().all()
+    parallel_list = [parallel[0] for parallel in parallels if parallel[0] is not None]
+    
+    return parallel_list
+
+def enrich_student_data(student: StudentInDB, db: Session, subject: Optional[str] = None):
+    average_percentage = None
+    predicted_average = None
+    danger_level = None
+    delta_percentage = None
+    subject_name = "Все" if not subject else subject
+    semester = None
+    actual_scores = []
+    predicted_scores = []
+    previous_class_score = None
+
+    if subject:
+        # Fetch specific subject score
+        score = db.query(ScoresInDB).filter(
+            ScoresInDB.student_id == student.id,
+            ScoresInDB.subject_name == subject
+        ).first()
+
+        if score:
+            actual_scores = score.actual_scores or []
+            predicted_scores = score.predicted_scores or []
+            previous_class_score = score.previous_class_score
+            delta_percentage = score.delta_percentage
+            danger_level = score.danger_level
+            subject_name = score.subject_name
+            semester = score.semester
+
+            # Calculate averages for this subject
+            valid_actual_scores = []
+            if isinstance(actual_scores, list):
+                valid_actual_scores = [s for s in actual_scores if s is not None and s > 0]
+                if valid_actual_scores:
+                    average_percentage = round(sum(valid_actual_scores) / len(valid_actual_scores), 1)
+            
+            if isinstance(predicted_scores, list):
+                    num_completed = len(valid_actual_scores)
+                    if num_completed > 0 and len(predicted_scores) >= num_completed:
+                        predicted_average = round(sum(predicted_scores[:num_completed]) / num_completed, 1)
+                    elif predicted_scores:
+                        predicted_average = round(sum(predicted_scores) / len(predicted_scores), 1)
+    else:
+        # Aggregated logic
+        all_scores = db.query(ScoresInDB).filter(
+            ScoresInDB.student_id == student.id
+        ).all()
+
+        all_valid_scores = []
+        overall_danger_level = 0
+        danger_count = 0
+        
+        for score in all_scores:
+            if score.actual_scores and isinstance(score.actual_scores, list):
+                valid_scores = [s for s in score.actual_scores if s is not None and s > 0]
+                all_valid_scores.extend(valid_scores)
+            
+            if score.danger_level is not None:
+                overall_danger_level += score.danger_level
+                danger_count += 1
+        
+        if all_valid_scores:
+            average_percentage = round(sum(all_valid_scores) / len(all_valid_scores), 1)
+        
+        if danger_count > 0:
+            danger_level = round(overall_danger_level / danger_count)
+
+        # Get latest score for displaying 'last_subject' if no subject filter is applied
+        latest_score = db.query(ScoresInDB).filter(
+            ScoresInDB.student_id == student.id
+        ).order_by(ScoresInDB.updated_at.desc()).first()
+        
+        if latest_score:
+            subject_name = latest_score.subject_name
+            semester = latest_score.semester
+
+    return {
+        "id": student.id,
+        "name": student.name,
+        "email": student.email,
+        "grade_id": student.grade_id,
+        "previous_class_score": previous_class_score,
+        "actual_scores": actual_scores,
+        "predicted_scores": predicted_scores,
+        "avg_percentage": average_percentage,
+        "predicted_avg": predicted_average,
+        "danger_level": danger_level,
+        "delta_percentage": delta_percentage,
+        "last_subject": subject_name,
+        "last_semester": semester
+    }
+
+@router.get("/students-list")
+async def get_students_unified(
+    grade_id: Optional[int] = Query(None),
+    parallel: Optional[str] = Query(None),
+    subject: Optional[str] = Query(None),
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    allowed_grade_ids = get_user_allowed_grade_ids(user_data, db)
+    
+    query = db.query(StudentInDB).join(GradeInDB)
+    
+    if allowed_grade_ids is not None:
+        query = query.filter(GradeInDB.id.in_(allowed_grade_ids))
+        
+    if grade_id:
+        query = query.filter(StudentInDB.grade_id == grade_id)
+    elif parallel:
+         # Filter by parallel
+         query = query.filter(
+             (GradeInDB.grade == parallel) | 
+             (GradeInDB.grade.like(f"{parallel} %")) | 
+             (GradeInDB.grade.like(f"{parallel}_%"))
+        )
+    
+    students = query.all()
+    
+    if subject:
+        return [enrich_student_data(student, db, subject) for student in students]
+    
+    summary = []
+    details = []
+    for student in students:
+        # Summary row (aggregated)
+        summary.append(enrich_student_data(student, db, None))
+        
+        # Detail rows (one per subject)
+        student_scores = db.query(ScoresInDB.subject_name).filter(
+            ScoresInDB.student_id == student.id
+        ).distinct().all()
+        
+        for (subj_name,) in student_scores:
+            if subj_name:
+                details.append(enrich_student_data(student, db, subj_name))
+    
+    return {
+        "summary": summary,
+        "details": details
+    }
+
+@router.get("/{grade_id}/subjects", response_model=List[str])
+async def get_grade_subjects(
+    grade_id: int,
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Get all subjects available in the system"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    # Check access
+    if not check_grade_access(user_data, grade_id, db):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # Return ALL subjects from the system if available
+    subjects = db.query(SubjectInDB.name).filter(SubjectInDB.is_active == 1).all()
+    if subjects:
+        return [s[0] for s in subjects]
+
+    # Fallback to distinct subjects for this grade via students -> scores
+    subjects_fallback = db.query(ScoresInDB.subject_name).distinct() \
+        .join(StudentInDB, StudentInDB.id == ScoresInDB.student_id) \
+        .filter(StudentInDB.grade_id == grade_id) \
+        .filter(ScoresInDB.subject_name.isnot(None)) \
+        .all()
+    
+    return [s[0] for s in subjects_fallback]
+
+@router.get("/students/{grade_id}", response_model=List[dict])
+async def get_students_by_grade(
+    grade_id: int,
+    subject: Optional[str] = Query(None),
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Get all students in a specific grade with optional subject filtering"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    # Check role-based access
+    if not check_grade_access(user_data, grade_id, db):
+        raise HTTPException(status_code=403, detail="You don't have access to this grade")
+    
+    grade = db.query(GradeInDB).filter(GradeInDB.id == grade_id).first()
+    if not grade:
+        raise HTTPException(status_code=404, detail="Grade not found")
+    
+    students = db.query(StudentInDB).filter(StudentInDB.grade_id == grade_id).all()
+
+    return [enrich_student_data(student, db, subject) for student in students]
+
 @router.get("/{grade_id}", response_model=dict)
 async def get_grade_by_id(
     grade_id: int,
@@ -684,177 +913,10 @@ async def debug_students_grades(
         "orphan_students": orphan_students
     }
 
-@router.get("/subjects", response_model=List[str])
-async def get_subjects(
-    token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db)
-):
-    """Get list of all unique subjects"""
-    user_data = verify_access_token(token)
-    if not user_data:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
-    # Get unique subjects from scores table
-    subjects = db.query(ScoresInDB.subject_name).distinct().all()
-    subject_list = [subject[0] for subject in subjects if subject[0] is not None]
-    
-    return subject_list
-
-@router.get("/parallels", response_model=List[str])
-async def get_parallels(
-    token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db)
-):
-    """Get list of all unique parallels/grades"""
-    user_data = verify_access_token(token)
-    if not user_data:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
-    # Get unique grades from grades table
-    parallels = db.query(GradeInDB.grade).distinct().all()
-    parallel_list = [parallel[0] for parallel in parallels if parallel[0] is not None]
-    
-    return parallel_list
-@router.get("/{grade_id}/subjects", response_model=List[str])
-async def get_grade_subjects(
-    grade_id: int,
-    token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db)
-):
-    """Get all subjects available in a specific grade"""
-    user_data = verify_access_token(token)
-    if not user_data:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
-    # Check access
-    if not check_grade_access(user_data, grade_id, db):
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    # Get distinct subjects for this grade via students -> scores
-    # Join: Grade -> Student -> Score
-    subjects = db.query(ScoresInDB.subject_name).distinct() \
-        .join(StudentInDB, StudentInDB.id == ScoresInDB.student_id) \
-        .filter(StudentInDB.grade_id == grade_id) \
-        .filter(ScoresInDB.subject_name.isnot(None)) \
-        .all()
-    
-    return [s[0] for s in subjects]
 
 
-@router.get("/students/{grade_id}", response_model=List[dict])
-async def get_students_by_grade(
-    grade_id: int,
-    subject: Optional[str] = Query(None),
-    token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db)
-):
-    """Get all students in a specific grade with optional subject filtering"""
-    user_data = verify_access_token(token)
-    if not user_data:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
-    # Check role-based access
-    if not check_grade_access(user_data, grade_id, db):
-        raise HTTPException(status_code=403, detail="You don't have access to this grade")
-    
-    grade = db.query(GradeInDB).filter(GradeInDB.id == grade_id).first()
-    if not grade:
-        raise HTTPException(status_code=404, detail="Grade not found")
-    
-    students = db.query(StudentInDB).filter(StudentInDB.grade_id == grade_id).all()
 
-    result = []
-    for student in students:
-        average_percentage = None
-        predicted_average = None
-        danger_level = None
-        delta_percentage = None
-        subject_name = "Все" if not subject else subject
-        semester = None
-        actual_scores = []
-        predicted_scores = []
-        previous_class_score = None
 
-        if subject:
-            # Fetch specific subject score
-            score = db.query(ScoresInDB).filter(
-                ScoresInDB.student_id == student.id,
-                ScoresInDB.subject_name == subject
-            ).first()
-
-            if score:
-                actual_scores = score.actual_scores or []
-                predicted_scores = score.predicted_scores or []
-                previous_class_score = score.previous_class_score
-                delta_percentage = score.delta_percentage
-                danger_level = score.danger_level
-                subject_name = score.subject_name
-                semester = score.semester
-
-                # Calculate averages for this subject
-                valid_actual_scores = []
-                if isinstance(actual_scores, list):
-                    valid_actual_scores = [s for s in actual_scores if s is not None and s > 0]
-                    if valid_actual_scores:
-                        average_percentage = round(sum(valid_actual_scores) / len(valid_actual_scores), 1)
-                
-                if isinstance(predicted_scores, list):
-                     num_completed = len(valid_actual_scores)
-                     if num_completed > 0 and len(predicted_scores) >= num_completed:
-                         predicted_average = round(sum(predicted_scores[:num_completed]) / num_completed, 1)
-                     elif predicted_scores:
-                          predicted_average = round(sum(predicted_scores) / len(predicted_scores), 1)
-        else:
-            # Aggregated logic
-            all_scores = db.query(ScoresInDB).filter(
-                ScoresInDB.student_id == student.id
-            ).all()
-
-            all_valid_scores = []
-            overall_danger_level = 0
-            danger_count = 0
-            
-            for score in all_scores:
-                if score.actual_scores and isinstance(score.actual_scores, list):
-                    valid_scores = [s for s in score.actual_scores if s is not None and s > 0]
-                    all_valid_scores.extend(valid_scores)
-                
-                if score.danger_level is not None:
-                    overall_danger_level += score.danger_level
-                    danger_count += 1
-            
-            if all_valid_scores:
-                average_percentage = round(sum(all_valid_scores) / len(all_valid_scores), 1)
-            
-            if danger_count > 0:
-                danger_level = round(overall_danger_level / danger_count)
-
-            # Get latest score for displaying 'last_subject' if no subject filter is applied
-            latest_score = db.query(ScoresInDB).filter(
-                ScoresInDB.student_id == student.id
-            ).order_by(ScoresInDB.updated_at.desc()).first()
-            
-            if latest_score:
-                subject_name = latest_score.subject_name
-                semester = latest_score.semester
-
-        result.append({
-            "id": student.id,
-            "name": student.name,
-            "email": student.email,
-            "grade_id": student.grade_id,
-            "previous_class_score": previous_class_score,
-            "actual_scores": actual_scores,
-            "predicted_scores": predicted_scores,
-            "avg_percentage": average_percentage,
-            "predicted_avg": predicted_average,
-            "danger_level": danger_level,
-            "delta_percentage": delta_percentage,
-            "last_subject": subject_name,
-            "last_semester": semester,
-        })
-    
-    return result
 
 @router.post("/students/", status_code=status.HTTP_201_CREATED)
 async def create_student(
