@@ -1100,7 +1100,12 @@ async def update_score(
         raise HTTPException(status_code=404, detail="Score not found")
     
     user_type = user_data.get("type")
-    user_id = user_data.get("user_id")
+    user_email = user_data.get("sub")
+    
+    # Get user_id from email
+    user = db.query(UserInDB).filter(UserInDB.email == user_email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
     
     # Check permissions
     if user_type == "admin":
@@ -1109,7 +1114,7 @@ async def update_score(
     elif user_type == "teacher":
         # Teachers can only edit scores for their assigned subjects/groups
         assignment = db.query(TeacherAssignmentInDB).filter(
-            TeacherAssignmentInDB.teacher_id == user_id,
+            TeacherAssignmentInDB.teacher_id == user.id,
             TeacherAssignmentInDB.subject_id == score.subject_id,
             TeacherAssignmentInDB.is_active == 1,
             or_(
@@ -1122,7 +1127,7 @@ async def update_score(
             # Check if they have subgroup assignment
             if score.subgroup_id:
                 assignment = db.query(TeacherAssignmentInDB).filter(
-                    TeacherAssignmentInDB.teacher_id == user_id,
+                    TeacherAssignmentInDB.teacher_id == user.id,
                     TeacherAssignmentInDB.subject_id == score.subject_id,
                     TeacherAssignmentInDB.subgroup_id == score.subgroup_id,
                     TeacherAssignmentInDB.is_active == 1
@@ -1213,14 +1218,19 @@ async def get_teacher_assignments(
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     
-    user_id = user_data.get("user_id")
+    user_email = user_data.get("sub")
     user_type = user_data.get("type")
     
     if user_type not in ["teacher", "admin"]:
         raise HTTPException(status_code=403, detail="Only teachers can access this endpoint")
     
+    # Get user_id from email
+    user = db.query(UserInDB).filter(UserInDB.email == user_email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
     assignments = db.query(TeacherAssignmentInDB).filter(
-        TeacherAssignmentInDB.teacher_id == user_id,
+        TeacherAssignmentInDB.teacher_id == user.id,
         TeacherAssignmentInDB.is_active == 1
     ).all()
     
@@ -1255,13 +1265,18 @@ async def get_teacher_students(
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     
-    user_id = user_data.get("user_id")
+    user_email = user_data.get("sub")
     user_type = user_data.get("type")
+    
+    # Get user_id from email
+    user = db.query(UserInDB).filter(UserInDB.email == user_email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
     
     # Check if teacher has assignment for this subject/grade/subgroup
     if user_type == "teacher":
         assignment_query = db.query(TeacherAssignmentInDB).filter(
-            TeacherAssignmentInDB.teacher_id == user_id,
+            TeacherAssignmentInDB.teacher_id == user.id,
             TeacherAssignmentInDB.subject_id == subject_id,
             TeacherAssignmentInDB.is_active == 1
         )
