@@ -574,7 +574,8 @@ def enrich_student_data(student: StudentInDB, db: Session, subject: Optional[str
         "danger_level": danger_level,
         "delta_percentage": delta_percentage,
         "last_subject": subject_name,
-        "last_semester": semester
+        "last_semester": semester,
+        "score_id": score_id
     }
 
 @router.get("/students-list")
@@ -1135,6 +1136,18 @@ async def update_score(
     # Update only provided fields
     update_dict = update_data.dict(exclude_unset=True)
     
+    # Handle actual_scores format conversion (dict to list)
+    if 'actual_scores' in update_dict and update_dict['actual_scores']:
+        scores_data = update_dict['actual_scores']
+        if isinstance(scores_data, dict):
+            # Convert dict {q1: val, q2: val, ...} to list [val, val, ...]
+            scores_list = []
+            for i in range(1, 5):
+                key = f'q{i}'
+                val = scores_data.get(key, 0)
+                scores_list.append(float(val) if val is not None else 0.0)
+            update_dict['actual_scores'] = scores_list
+    
     for key, value in update_dict.items():
         if hasattr(score, key):
             setattr(score, key, value)
@@ -1142,11 +1155,18 @@ async def update_score(
     # Recalculate danger level if actual_scores changed
     if 'actual_scores' in update_dict and score.actual_scores:
         actual = score.actual_scores
-        predicted = score.predicted_scores or {}
+        predicted = score.predicted_scores or []
         
-        # Calculate average of actual scores
-        actual_values = [v for v in actual.values() if isinstance(v, (int, float))]
-        predicted_values = [v for v in predicted.values() if isinstance(v, (int, float))]
+        # Calculate average of actual scores (now it's a list)
+        if isinstance(actual, list):
+            actual_values = [v for v in actual if isinstance(v, (int, float)) and v > 0]
+        else:
+            actual_values = [v for v in actual.values() if isinstance(v, (int, float)) and v > 0]
+        
+        if isinstance(predicted, list):
+            predicted_values = [v for v in predicted if isinstance(v, (int, float)) and v > 0]
+        else:
+            predicted_values = [v for v in predicted.values() if isinstance(v, (int, float)) and v > 0]
         
         if actual_values:
             avg_actual = sum(actual_values) / len(actual_values)
