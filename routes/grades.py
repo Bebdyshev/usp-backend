@@ -837,6 +837,49 @@ async def update_student_count(
         "studentCount": grade.studentcount
     }
 
+@router.put("/students/{student_id}", status_code=status.HTTP_200_OK)
+async def update_student(
+    student_id: int,
+    update_data: UpdateStudent,
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Update a student by ID"""
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    # Check if the user is an admin
+    if user_data.get("type") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can update students")
+    
+    student = db.query(StudentInDB).filter(StudentInDB.id == student_id).first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found")
+    
+    # Update only the fields that are provided
+    update_dict = update_data.dict(exclude_unset=True)
+    for key, value in update_dict.items():
+        if hasattr(student, key):
+            setattr(student, key, value)
+    
+    db.commit()
+    db.refresh(student)
+    
+    return {
+        "message": "Student updated successfully",
+        "student": {
+            "id": student.id,
+            "name": student.name,
+            "email": student.email,
+            "student_id_number": student.student_id_number,
+            "phone": student.phone,
+            "parent_contact": student.parent_contact,
+            "grade_id": student.grade_id,
+            "is_active": student.is_active
+        }
+    }
+
 @router.delete("/students/{student_id}", status_code=status.HTTP_200_OK)
 async def delete_student(
     student_id: int,
