@@ -495,6 +495,7 @@ def enrich_student_data(student: StudentInDB, db: Session, subject: Optional[str
     actual_scores = []
     predicted_scores = []
     previous_class_score = None
+    score_id = None
 
     if subject:
         # Fetch specific subject score
@@ -504,6 +505,7 @@ def enrich_student_data(student: StudentInDB, db: Session, subject: Optional[str
         ).first()
 
         if score:
+            score_id = score.id
             actual_scores = score.actual_scores or []
             predicted_scores = score.predicted_scores or []
             previous_class_score = score.previous_class_score
