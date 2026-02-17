@@ -258,4 +258,195 @@ async def delete_user(
         "message": "User deleted successfully"
     }
 
+from fastapi import File, UploadFile
+import openpyxl
+import io
+
+class BulkUploadResult(BaseModel):
+    success: bool
+    total_processed: int
+    created_count: int
+    error_count: int
+    errors: List[dict]
+    created_users: List[dict]
+
+@router.post("/bulk-upload-teachers", response_model=BulkUploadResult)
+async def bulk_upload_teachers(
+    file: UploadFile = File(...),
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Bulk upload teachers from Excel file"""
+    admin_data = verify_access_token(token)
+    if not admin_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    
+    # Only admins can bulk upload
+    if admin_data.get("type") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can bulk upload users")
+    
+    # Validate file type
+    if not file.filename.endswith(('.xlsx', '.xls')):
+        raise HTTPException(status_code=400, detail="File must be an Excel file (.xlsx or .xls)")
+    
+    try:
+        # Read Excel file
+        contents = await file.read()
+        workbook = openpyxl.load_workbook(io.BytesIO(contents))
+        sheet = workbook.active
+        
+        created_users = []
+        errors = []
+        total_processed = 0
+        
+        # Skip header row, start from row 2
+        for row_idx, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
+            if not row or all(cell is None or str(cell).strip() == '' for cell in row):
+                continue  # Skip empty rows
+            
+            total_processed += 1
+            
+            try:
+                # Expected columns: №, ФИО, Должность, Email
+                # Handle different possible column counts
+                fio = None
+                position = None
+                email = None
+                
+                if len(row) >= 4:
+                    # Format: №, ФИО, Должность, Email
+                    fio = str(row[1]).strip() if row[1] else None
+                    position = str(row[2]).strip() if row[2] else None
+                    email = str(row[3]).strip() if row[3] else None
+                elif len(row) >= 3:
+                    # Format: ФИО, Должность, Email
+                    fio = str(row[0]).strip() if row[0] else None
+                    position = str(row[1]).strip() if row[1] else None
+                    email = str(row[2]).strip() if row[2] else None
+                
+                if not fio or not email:
+                    errors.append({
+                        "row": row_idx,
+                        "error": "Missing required fields (ФИО or Email)",
+                        "data": {"fio": fio, "email": email}
+                    })
+                    continue
+                
+                # Check if email already exists
+                existing_user = db.query(UserInDB).filter(UserInDB.email == email).first()
+                if existing_user:
+                    errors.append({
+                        "row": row_idx,
+                        "error": "Email already exists",
+                        "data": {"fio": fio, "email": email}
+                    })
+                    continue
+                
+                # Parse FIO (assumes format: "Last First Middle" or "Last First")
+                fio_parts = fio.split()
+                last_name = fio_parts[0] if len(fio_parts) > 0 else ""
+                first_name = fio_parts[1] if len(fio_parts) > 1 else ""
+                
+                # Extract subject from position field
+                subject_name = None
+                if position:
+                    # Common subject keywords in Russian positions
+                    subject_keywords = {
+                        'англ': 'Английский язык',
+                        'химии': 'Химия',
+                        'биологии': 'Биология',
+                        'каз': 'Казахский язык',
+                        'рус': 'Русский язык',
+                        'матем': 'Математика',
+                        'физики': 'Физика',
+                        'истории': 'История',
+                        'географии': 'География',
+                        'физ.культуры': 'Физическая культура',
+                        'искусства': 'Искусство',
+                        'НВП': 'НВП'
+                    }
+                    
+                    position_lower = position.lower()
+                    for keyword, full_name in subject_keywords.items():
+                        if keyword.lower() in position_lower:
+                            subject_name = full_name
+                            break
+                
+                # Create teacher account with default password "123"
+                hashed_password = hash_password("123")
+                
+                new_teacher = UserInDB(
+                    name=fio,
+                    first_name=first_name,
+                    last_name=last_name,
+                    email=email,
+                    hashed_password=hashed_password,
+                    type="teacher"
+                )
+                
+                db.add(new_teacher)
+                db.commit()
+                db.refresh(new_teacher)
+                
+                # Create subject if extracted and doesn't exist
+                subject_id = None
+                if subject_name:
+                    try:
+                        existing_subject = db.query(SubjectInDB).filter(SubjectInDB.name == subject_name).first()
+                        if not existing_subject:
+                            new_subject = SubjectInDB(
+                                name=subject_name,
+                                description=f"Автоматически создан при импорте учителя {fio}",
+                                applicable_parallels=[],
+                                is_active=1
+                            )
+                            db.add(new_subject)
+                            db.commit()
+                            db.refresh(new_subject)
+                            subject_id = new_subject.id
+                        else:
+                            subject_id = existing_subject.id
+                        
+                        # Create teacher assignment for the subject
+                        from schemas.models import TeacherAssignmentInDB
+                        new_assignment = TeacherAssignmentInDB(
+                            teacher_id=new_teacher.id,
+                            subject_id=subject_id,
+                            is_active=1
+                        )
+                        db.add(new_assignment)
+                        db.commit()
+                    except Exception as subject_error:
+                        # Non-fatal: teacher created but subject assignment failed
+                        pass
+                
+                created_users.append({
+                    "id": new_teacher.id,
+                    "name": fio,
+                    "email": email,
+                    "position": position,
+                    "subject": subject_name
+                })
+
+                
+            except Exception as e:
+                db.rollback()
+                errors.append({
+                    "row": row_idx,
+                    "error": str(e),
+                    "data": {"fio": fio if 'fio' in locals() else None, "email": email if 'email' in locals() else None}
+                })
+        
+        return BulkUploadResult(
+            success=len(errors) == 0,
+            total_processed=total_processed,
+            created_count=len(created_users),
+            error_count=len(errors),
+            errors=errors,
+            created_users=created_users
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to process Excel file: {str(e)}")
+
 
