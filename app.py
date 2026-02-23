@@ -93,5 +93,5 @@ async def health_check():
         "status": "healthy",
         "message": "USP Backend is running",
         "version": "2.3.0",
-        "update": 19
+        "update": 20
     }

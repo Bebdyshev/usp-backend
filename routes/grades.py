@@ -411,9 +411,15 @@ async def create_grade(
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     
-    # Check if the user is an admin
     if user_data.get("type") != "admin":
         raise HTTPException(status_code=403, detail="Only admins can create classes")
+    
+    existing = db.query(GradeInDB).filter(GradeInDB.grade == record.grade).first()
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Класс '{record.grade}' уже существует"
+        )
     
     # Resolve current user (creator) id
     creator_user = db.query(UserInDB).filter(UserInDB.email == user_data.get("sub")).first()
