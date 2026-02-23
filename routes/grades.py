@@ -143,19 +143,21 @@ async def send_excel_as_csv_to_openai(
 
 
 @router.get("/get_class")
-def get_class_data(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+def get_class_data(
+    subject: Optional[str] = Query(None, description="Filter by subject name"),
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
     try:
         user_data = verify_access_token(token)  
         if not user_data:
             raise HTTPException(status_code=401, detail="Invalid or expired token")
         
-        # Get allowed grade IDs for role-based filtering
         allowed_grade_ids = get_user_allowed_grade_ids(user_data, db)
         
-        # Build query with role-based filtering
         grades_query = db.query(GradeInDB)
-        if allowed_grade_ids is not None:  # Not admin
-            if not allowed_grade_ids:  # Empty set - no access
+        if allowed_grade_ids is not None:
+            if not allowed_grade_ids:
                 return {"class_data": []}
             grades_query = grades_query.filter(GradeInDB.id.in_(allowed_grade_ids))
         
@@ -169,12 +171,13 @@ def get_class_data(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
         for grade in db_grades:
             students = db.query(StudentInDB).filter(StudentInDB.grade_id == grade.id).all()
             student_info_list = []
-            subject_name = None  # Инициализируем переменную
             
             for student in students:
-                student_scores = db.query(ScoresInDB).filter(ScoresInDB.student_id == student.id).all()
+                scores_query = db.query(ScoresInDB).filter(ScoresInDB.student_id == student.id)
+                if subject:
+                    scores_query = scores_query.filter(ScoresInDB.subject_name == subject)
+                student_scores = scores_query.all()
 
-                # Calculate overall average across all subjects
                 all_valid_scores = []
                 overall_danger_level = 0
                 danger_count = 0
@@ -182,22 +185,18 @@ def get_class_data(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
                 actual_scores = []
                 predicted_scores = []
                 previous_class_score = None
-                teacher_percent = None
                 danger_level = None
                 delta_percentage = None
 
                 for score in student_scores:
-                    # Collect all valid scores across all subjects
                     if score.actual_scores and isinstance(score.actual_scores, list):
                         valid_scores = [s for s in score.actual_scores if s is not None and s > 0]
                         all_valid_scores.extend(valid_scores)
                     
-                    # Calculate average danger level
                     if score.danger_level is not None:
                         overall_danger_level += score.danger_level
                         danger_count += 1
                     
-                    # Get the latest score record for this student (for backward compatibility)
                     if score.actual_scores:
                         actual_scores = score.actual_scores if isinstance(score.actual_scores, list) else []
                     if score.predicted_scores:
@@ -206,14 +205,11 @@ def get_class_data(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
                         previous_class_score = score.previous_class_score
                     danger_level = score.danger_level  
                     delta_percentage = score.delta_percentage
-                    subject_name = score.subject_name
                 
-                # Calculate overall average percentage
                 avg_percentage = None
                 if all_valid_scores:
                     avg_percentage = round(sum(all_valid_scores) / len(all_valid_scores), 1)
                 
-                # Calculate average danger level
                 if danger_count > 0:
                     danger_level = round(overall_danger_level / danger_count)
 
@@ -222,10 +218,10 @@ def get_class_data(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
                     "student_name": student.name,
                     "email": student.email,
                     "previous_class_score": previous_class_score,
-                    "actual_score": actual_scores,  # Keep for backward compatibility
+                    "actual_score": actual_scores,
                     "actual_scores": actual_scores,
                     "predicted_scores": predicted_scores,
-                    "avg_percentage": avg_percentage,  # NEW: Overall average
+                    "avg_percentage": avg_percentage,
                     "danger_level": danger_level,
                     "delta_percentage": delta_percentage,
                     "class_liter": grade.grade,  
@@ -233,7 +229,7 @@ def get_class_data(token: str = Depends(oauth2_scheme), db: Session = Depends(ge
                 
             class_data.append({
                 "curator_name": grade.curator_name,
-                "subject_name": subject_name,
+                "subject_name": subject,
                 "grade_liter": grade.grade,
                 "class": student_info_list
             })
@@ -464,11 +460,14 @@ async def get_subjects(
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     
-    # Get unique subjects from scores table
-    subjects = db.query(ScoresInDB.subject_name).distinct().all()
-    subject_list = [subject[0] for subject in subjects if subject[0] is not None]
+    subjects = db.query(SubjectInDB.name).filter(SubjectInDB.is_active == 1).all()
+    subject_list = [s[0] for s in subjects if s[0] is not None]
     
-    return subject_list
+    if not subject_list:
+        scores_subjects = db.query(ScoresInDB.subject_name).distinct().all()
+        subject_list = [s[0] for s in scores_subjects if s[0] is not None]
+    
+    return sorted(subject_list)
 
 @router.get("/parallels", response_model=List[str])
 async def get_parallels(
