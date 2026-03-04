@@ -300,6 +300,30 @@ def _parse_class_cell(cell_val) -> Tuple[Optional[str], Optional[str]]:
     return None, None
 
 
+def _parse_class_list_cell(cell_val) -> Tuple[List[Tuple[str, str]], List[str]]:
+    """
+    Parse a class cell that may contain multiple classes separated by commas.
+    Example: "11A, 11B, 12A" -> [("11","A"), ("11","B"), ("12","A")]
+    Returns (valid_classes, invalid_tokens)
+    """
+    if cell_val is None or str(cell_val).strip() == "":
+        return [], []
+
+    raw_value = str(cell_val).strip()
+    tokens = [t.strip() for t in raw_value.split(",") if t and t.strip()]
+    valid_classes: List[Tuple[str, str]] = []
+    invalid_tokens: List[str] = []
+
+    for token in tokens:
+        grade_str, parallel_str = _parse_class_cell(token)
+        if grade_str and parallel_str:
+            valid_classes.append((grade_str, parallel_str))
+        else:
+            invalid_tokens.append(token)
+
+    return valid_classes, invalid_tokens
+
+
 def _get_or_create_grade(db: Session, grade_str: str, parallel: str, user_id: int) -> Optional[GradeInDB]:
     existing = db.query(GradeInDB).filter(
         GradeInDB.grade == grade_str,
@@ -366,7 +390,7 @@ async def bulk_upload_teachers(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
 ):
-    """Bulk upload teachers from Excel file. Supports: ФИО, Должность, Email, Класс, Предмет, Предметная группа (11-12)"""
+    """Bulk upload teachers from Excel file. Supports: ФИО, Должность, Email, Класс(ы), Предмет, Предметная группа (11-12). Классы можно указывать через запятую."""
     admin_data = verify_access_token(token)
     if not admin_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
@@ -427,7 +451,17 @@ async def bulk_upload_teachers(
                 row_results.append(BulkUploadRowResult(row=row_idx, status="skipped", message=err["error"]))
                 continue
 
-            grade_str, parallel_str = _parse_class_cell(class_cell) if class_cell is not None else (None, None)
+            class_pairs, invalid_class_tokens = _parse_class_list_cell(class_cell)
+            if invalid_class_tokens:
+                err = {
+                    "row": row_idx,
+                    "error": f"Некорректные классы: {', '.join(invalid_class_tokens)}",
+                    "data": {"class_cell": class_cell}
+                }
+                errors.append(err)
+                row_results.append(BulkUploadRowResult(row=row_idx, status="skipped", message=err["error"]))
+                continue
+
             subject_name = subject_cell
             if not subject_name and position:
                 subject_keywords = {
@@ -442,16 +476,21 @@ async def bulk_upload_teachers(
                         subject_name = full
                         break
 
-            if group_cell and grade_str:
-                try:
-                    grade_num = int(grade_str)
-                    if grade_num not in (11, 12):
-                        err = {"row": row_idx, "error": "Предметная группа допускается только для 11-12 классов", "data": {}}
-                        errors.append(err)
-                        row_results.append(BulkUploadRowResult(row=row_idx, status="skipped", message=err["error"]))
-                        continue
-                except (ValueError, TypeError):
-                    pass
+            if group_cell and class_pairs:
+                has_invalid_for_group = False
+                for grade_str, _ in class_pairs:
+                    try:
+                        if int(grade_str) not in (11, 12):
+                            has_invalid_for_group = True
+                            break
+                    except (ValueError, TypeError):
+                        has_invalid_for_group = True
+                        break
+                if has_invalid_for_group:
+                    err = {"row": row_idx, "error": "Предметная группа допускается только для 11-12 классов", "data": {}}
+                    errors.append(err)
+                    row_results.append(BulkUploadRowResult(row=row_idx, status="skipped", message=err["error"]))
+                    continue
 
             try:
                 existing_user = db.query(UserInDB).filter(UserInDB.email == email).first()
@@ -478,53 +517,78 @@ async def bulk_upload_teachers(
                     db.refresh(teacher)
                     created_users.append({"id": teacher.id, "name": fio, "email": email, "position": position, "subject": subject_name})
 
-                grade_id = None
                 subject_id = None
-                subject_group_id = None
-                class_display = None
-
-                if grade_str and parallel_str:
-                    db_grade = _get_or_create_grade(db, grade_str, parallel_str, creator_id)
-                    if db_grade:
-                        grade_id = db_grade.id
-                        class_display = f"{grade_str}{parallel_str}"
+                class_display = ",".join([f"{g}{p}" for g, p in class_pairs]) if class_pairs else None
 
                 if subject_name:
                     subj = _get_or_create_subject(db, subject_name)
                     if subj:
                         subject_id = subj.id
 
-                if subject_id and grade_id and group_cell:
-                    try:
-                        grade_num = int(grade_str)
-                        if grade_num in (11, 12):
-                            sg = _get_or_create_subject_group(db, grade_id, subject_id, group_cell)
-                            if sg:
-                                subject_group_id = sg.id
-                    except (ValueError, TypeError):
-                        pass
-
                 if subject_id:
-                    filters = [
-                        TeacherAssignmentInDB.teacher_id == teacher.id,
-                        TeacherAssignmentInDB.subject_id == subject_id,
-                        TeacherAssignmentInDB.is_active == 1,
-                        TeacherAssignmentInDB.subgroup_id.is_(None),
-                    ]
-                    filters.append(TeacherAssignmentInDB.grade_id == grade_id if grade_id else TeacherAssignmentInDB.grade_id.is_(None))
-                    filters.append(TeacherAssignmentInDB.subject_group_id == subject_group_id if subject_group_id else TeacherAssignmentInDB.subject_group_id.is_(None))
-                    existing_assignment = db.query(TeacherAssignmentInDB).filter(and_(*filters)).first()
-                    if not existing_assignment:
-                        new_assignment = TeacherAssignmentInDB(
-                            teacher_id=teacher.id,
-                            subject_id=subject_id,
-                            grade_id=grade_id,
-                            subject_group_id=subject_group_id,
-                            subgroup_id=None,
-                            is_active=1,
-                        )
-                        db.add(new_assignment)
-                        db.commit()
+                    # If no class specified, keep backward-compatible subject-only assignment
+                    if not class_pairs:
+                        filters = [
+                            TeacherAssignmentInDB.teacher_id == teacher.id,
+                            TeacherAssignmentInDB.subject_id == subject_id,
+                            TeacherAssignmentInDB.is_active == 1,
+                            TeacherAssignmentInDB.subgroup_id.is_(None),
+                            TeacherAssignmentInDB.grade_id.is_(None),
+                            TeacherAssignmentInDB.subject_group_id.is_(None),
+                        ]
+                        existing_assignment = db.query(TeacherAssignmentInDB).filter(and_(*filters)).first()
+                        if not existing_assignment:
+                            new_assignment = TeacherAssignmentInDB(
+                                teacher_id=teacher.id,
+                                subject_id=subject_id,
+                                grade_id=None,
+                                subject_group_id=None,
+                                subgroup_id=None,
+                                is_active=1,
+                            )
+                            db.add(new_assignment)
+                            db.commit()
+                    else:
+                        for grade_str, parallel_str in class_pairs:
+                            db_grade = _get_or_create_grade(db, grade_str, parallel_str, creator_id)
+                            if not db_grade:
+                                continue
+
+                            grade_id = db_grade.id
+                            subject_group_id = None
+                            if group_cell:
+                                try:
+                                    if int(grade_str) in (11, 12):
+                                        sg = _get_or_create_subject_group(db, grade_id, subject_id, group_cell)
+                                        if sg:
+                                            subject_group_id = sg.id
+                                except (ValueError, TypeError):
+                                    subject_group_id = None
+
+                            filters = [
+                                TeacherAssignmentInDB.teacher_id == teacher.id,
+                                TeacherAssignmentInDB.subject_id == subject_id,
+                                TeacherAssignmentInDB.is_active == 1,
+                                TeacherAssignmentInDB.subgroup_id.is_(None),
+                                TeacherAssignmentInDB.grade_id == grade_id,
+                            ]
+                            filters.append(
+                                TeacherAssignmentInDB.subject_group_id == subject_group_id
+                                if subject_group_id
+                                else TeacherAssignmentInDB.subject_group_id.is_(None)
+                            )
+                            existing_assignment = db.query(TeacherAssignmentInDB).filter(and_(*filters)).first()
+                            if not existing_assignment:
+                                new_assignment = TeacherAssignmentInDB(
+                                    teacher_id=teacher.id,
+                                    subject_id=subject_id,
+                                    grade_id=grade_id,
+                                    subject_group_id=subject_group_id,
+                                    subgroup_id=None,
+                                    is_active=1,
+                                )
+                                db.add(new_assignment)
+                                db.commit()
 
                 status_msg = "updated" if existing_user else "created"
                 row_results.append(BulkUploadRowResult(
