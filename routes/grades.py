@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from config import get_db
 from schemas.models import *
-from sqlalchemy import or_
+from sqlalchemy import or_, and_
 from auth_utils import verify_access_token
 from routes.auth import oauth2_scheme
 from role_utils import get_user_allowed_grade_ids, check_grade_access
@@ -1405,14 +1405,17 @@ async def get_teacher_assignments(
         grade = db.query(GradeInDB).filter(GradeInDB.id == assignment.grade_id).first() if assignment.grade_id else None
         subgroup = db.query(SubgroupInDB).filter(SubgroupInDB.id == assignment.subgroup_id).first() if assignment.subgroup_id else None
         
+        subject_group = db.query(SubjectGroupInDB).filter(SubjectGroupInDB.id == assignment.subject_group_id).first() if assignment.subject_group_id else None
         result.append({
             "id": assignment.id,
             "subject_id": assignment.subject_id,
             "subject_name": subject.name if subject else None,
             "grade_id": assignment.grade_id,
-            "grade_name": grade.grade if grade else "Все классы",
+            "grade_name": f"{grade.grade}{grade.parallel}" if grade else "Все классы",
             "subgroup_id": assignment.subgroup_id,
-            "subgroup_name": subgroup.name if subgroup else None
+            "subgroup_name": subgroup.name if subgroup else None,
+            "subject_group_id": assignment.subject_group_id,
+            "subject_group_name": subject_group.name if subject_group else None
         })
     
     return result
@@ -1422,10 +1425,11 @@ async def get_teacher_students(
     subject_id: int = Query(...),
     grade_id: Optional[int] = Query(None),
     subgroup_id: Optional[int] = Query(None),
+    subject_group_id: Optional[int] = Query(None),
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
 ):
-    """Get students that a teacher can grade for a specific subject/grade/subgroup"""
+    """Get students that a teacher can grade for a specific subject/grade/subgroup/subject_group"""
     user_data = verify_access_token(token)
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
@@ -1461,7 +1465,14 @@ async def get_teacher_students(
                     TeacherAssignmentInDB.subgroup_id == None
                 )
             )
-        
+        if subject_group_id:
+            assignment_query = assignment_query.filter(
+                or_(
+                    TeacherAssignmentInDB.subject_group_id == subject_group_id,
+                    TeacherAssignmentInDB.subject_group_id == None
+                )
+            )
+
         assignment = assignment_query.first()
         if not assignment:
             raise HTTPException(status_code=403, detail="You don't have permission to view these students")
@@ -1514,6 +1525,7 @@ async def upload_excel_grades(
     teacher_name: str = Form(...),
     semester: int = Form(1),
     subgroup_id: Optional[int] = Form(None),
+    subject_group_id: Optional[int] = Form(None),
     file: UploadFile = File(...),
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
@@ -1521,7 +1533,7 @@ async def upload_excel_grades(
     """
     Upload Excel file with student grades
     Requires: grade_id, subject_id, teacher_name, file
-    Optional: semester (default 1), subgroup_id
+    Optional: semester (default 1), subgroup_id, subject_group_id (for 11-12)
     """
     try:
         # Verify access (admin or teacher)
@@ -1540,9 +1552,9 @@ async def upload_excel_grades(
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
-        # If teacher, check if they have assignment for this subject/grade
+        # If teacher, check if they have assignment for this subject/grade/subgroup/subject_group
         if user_type == "teacher":
-            assignment = db.query(TeacherAssignmentInDB).filter(
+            assignment_filters = [
                 TeacherAssignmentInDB.teacher_id == user.id,
                 TeacherAssignmentInDB.subject_id == subject_id,
                 TeacherAssignmentInDB.is_active == 1,
@@ -1550,11 +1562,26 @@ async def upload_excel_grades(
                     TeacherAssignmentInDB.grade_id == grade_id,
                     TeacherAssignmentInDB.grade_id == None
                 )
-            ).first()
-            
+            ]
+            if subgroup_id:
+                assignment_filters.append(
+                    or_(
+                        TeacherAssignmentInDB.subgroup_id == subgroup_id,
+                        TeacherAssignmentInDB.subgroup_id == None
+                    )
+                )
+            if subject_group_id:
+                assignment_filters.append(
+                    or_(
+                        TeacherAssignmentInDB.subject_group_id == subject_group_id,
+                        TeacherAssignmentInDB.subject_group_id == None
+                    )
+                )
+            assignment = db.query(TeacherAssignmentInDB).filter(and_(*assignment_filters)).first()
+
             if not assignment:
                 raise HTTPException(
-                    status_code=403, 
+                    status_code=403,
                     detail="You don't have permission to upload grades for this subject and class"
                 )
         
@@ -1591,6 +1618,19 @@ async def upload_excel_grades(
             ).first()
             if not subgroup:
                 raise HTTPException(status_code=404, detail="Subgroup not found or doesn't belong to the specified grade")
+
+        # Validate subject_group if provided (grades 11-12 only)
+        subject_group = None
+        if subject_group_id:
+            from schemas.models import SubjectGroupInDB
+            subject_group = db.query(SubjectGroupInDB).filter(
+                SubjectGroupInDB.id == subject_group_id,
+                SubjectGroupInDB.grade_id == grade_id,
+                SubjectGroupInDB.subject_id == subject_id,
+                SubjectGroupInDB.is_active == 1
+            ).first()
+            if not subject_group:
+                raise HTTPException(status_code=404, detail="Subject group not found or doesn't belong to the specified grade/subject")
         
         # Load prediction weights from database
         prediction_settings = db.query(PredictionSettings).filter(
@@ -1712,6 +1752,8 @@ async def upload_excel_grades(
                     db_score.delta_percentage = round(percentage_difference, 1)
                     db_score.grade_id = grade_id
                     db_score.subgroup_id = subgroup_id
+                    if subject_group_id is not None:
+                        db_score.subject_group_id = subject_group_id
                 else:
                     # Create new record
                     new_score = ScoresInDB(
@@ -1727,7 +1769,8 @@ async def upload_excel_grades(
                         academic_year="2024-2025",  # TODO: Make this configurable
                         student_id=db_student.id,
                         grade_id=grade_id,
-                        subgroup_id=subgroup_id
+                        subgroup_id=subgroup_id,
+                        subject_group_id=subject_group_id
                     )
                     db.add(new_score)
                 

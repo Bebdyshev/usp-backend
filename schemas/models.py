@@ -47,6 +47,7 @@ class GradeInDB(Base):
     students = relationship("StudentInDB", back_populates="grade", cascade="all, delete-orphan")
     scores = relationship("ScoresInDB", back_populates="grade", cascade="all, delete-orphan")
     subgroups = relationship("SubgroupInDB", back_populates="grade", cascade="all, delete-orphan")
+    subject_groups = relationship("SubjectGroupInDB", back_populates="grade", cascade="all, delete-orphan")
     curator_assignments = relationship("CuratorGradeInDB", foreign_keys="CuratorGradeInDB.grade_id")
 
     # Composite index for better query performance
@@ -77,6 +78,7 @@ class StudentInDB(Base):
     achievements = relationship("AchievementInDB", back_populates="student", cascade="all, delete-orphan")
 
     scores = relationship("ScoresInDB", back_populates="student", cascade="all, delete-orphan")
+    subject_group_memberships = relationship("StudentSubjectGroupMembershipInDB", back_populates="student", cascade="all, delete-orphan")
 
 class ScoresInDB(Base):
     __tablename__ = "scores"
@@ -104,6 +106,8 @@ class ScoresInDB(Base):
     subject = relationship("SubjectInDB", back_populates="scores")  # New relationship
     subgroup_id = Column(Integer, ForeignKey("subgroups.id"), nullable=True)
     subgroup = relationship("SubgroupInDB")
+    subject_group_id = Column(Integer, ForeignKey("subject_groups.id", ondelete="SET NULL"), nullable=True)
+    subject_group = relationship("SubjectGroupInDB")
 
     # GIN indexes for JSONB columns (better for JSON queries)
     __table_args__ = (
@@ -125,6 +129,7 @@ class SubjectInDB(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     scores = relationship("ScoresInDB", back_populates="subject")
+    subject_groups = relationship("SubjectGroupInDB", back_populates="subject", cascade="all, delete-orphan")
 
 class PredictionSettings(Base):
     __tablename__ = "prediction_settings"
@@ -385,6 +390,38 @@ class SubgroupInDB(Base):
     students = relationship("StudentInDB", back_populates="subgroup")
     teacher_assignments = relationship("TeacherAssignmentInDB", back_populates="subgroup")
 
+
+class SubjectGroupInDB(Base):
+    __tablename__ = "subject_groups"
+
+    id = Column(Integer, primary_key=True, index=True)
+    grade_id = Column(Integer, ForeignKey("grades.id", ondelete="CASCADE"), nullable=False)
+    subject_id = Column(Integer, ForeignKey("subjects.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String(100), nullable=False, index=True)
+    is_active = Column(Integer, default=1, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    grade = relationship("GradeInDB", back_populates="subject_groups")
+    subject = relationship("SubjectInDB", back_populates="subject_groups")
+    teacher_assignments = relationship("TeacherAssignmentInDB", back_populates="subject_group")
+    student_memberships = relationship("StudentSubjectGroupMembershipInDB", back_populates="subject_group", cascade="all, delete-orphan")
+
+
+class StudentSubjectGroupMembershipInDB(Base):
+    __tablename__ = "student_subject_group_memberships"
+
+    id = Column(Integer, primary_key=True, index=True)
+    student_id = Column(Integer, ForeignKey("students.id", ondelete="CASCADE"), nullable=False)
+    subject_group_id = Column(Integer, ForeignKey("subject_groups.id", ondelete="CASCADE"), nullable=False)
+    is_active = Column(Integer, default=1, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    student = relationship("StudentInDB", back_populates="subject_group_memberships")
+    subject_group = relationship("SubjectGroupInDB", back_populates="student_memberships")
+
+
 class CuratorGradeInDB(Base):
     __tablename__ = "curator_grades"
 
@@ -409,6 +446,7 @@ class TeacherAssignmentInDB(Base):
     subject_id = Column(Integer, ForeignKey("subjects.id", ondelete="CASCADE"), nullable=False)
     grade_id = Column(Integer, ForeignKey("grades.id", ondelete="CASCADE"), nullable=True)
     subgroup_id = Column(Integer, ForeignKey("subgroups.id", ondelete="CASCADE"), nullable=True)
+    subject_group_id = Column(Integer, ForeignKey("subject_groups.id", ondelete="SET NULL"), nullable=True)
     is_active = Column(Integer, default=1, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -417,11 +455,9 @@ class TeacherAssignmentInDB(Base):
     subject = relationship("SubjectInDB", foreign_keys=[subject_id])
     grade = relationship("GradeInDB", foreign_keys=[grade_id])
     subgroup = relationship("SubgroupInDB", foreign_keys=[subgroup_id])
+    subject_group = relationship("SubjectGroupInDB", foreign_keys=[subject_group_id], back_populates="teacher_assignments")
 
-    # Unique constraint: one teacher per subject per subgroup (or grade if no subgroup)
-    __table_args__ = (
-        Index('ix_teacher_assignment_unique', 'teacher_id', 'subject_id', 'grade_id', 'subgroup_id', unique=True),
-    )
+    # Unique constraint enforced via migration (COALESCE for NULL handling)
 
 class DisciplinaryActionInDB(Base):
     __tablename__ = "disciplinary_actions"
@@ -497,14 +533,44 @@ class CuratorAssignmentResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class CreateSubjectGroup(BaseModel):
+    grade_id: int
+    subject_id: int
+    name: str
+
+
+class UpdateSubjectGroup(BaseModel):
+    name: Optional[str] = None
+    is_active: Optional[int] = None
+
+
+class SubjectGroupResponse(BaseModel):
+    id: int
+    grade_id: int
+    subject_id: int
+    name: str
+    is_active: int
+    created_at: datetime
+    updated_at: datetime
+    grade_name: Optional[str] = None
+    subject_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
 class CreateTeacherAssignment(BaseModel):
     teacher_id: int
     subject_id: int
     grade_id: Optional[int] = None
     subgroup_id: Optional[int] = None
+    subject_group_id: Optional[int] = None
+
 
 class UpdateTeacherAssignment(BaseModel):
     is_active: Optional[int] = None
+    subject_group_id: Optional[int] = None
+
 
 class TeacherAssignmentResponse(BaseModel):
     id: int
@@ -512,6 +578,7 @@ class TeacherAssignmentResponse(BaseModel):
     subject_id: int
     grade_id: Optional[int] = None
     subgroup_id: Optional[int] = None
+    subject_group_id: Optional[int] = None
     is_active: int
     created_at: datetime
     updated_at: datetime
@@ -519,6 +586,7 @@ class TeacherAssignmentResponse(BaseModel):
     subject_name: Optional[str] = None
     grade_name: Optional[str] = None
     subgroup_name: Optional[str] = None
+    subject_group_name: Optional[str] = None
 
     class Config:
         from_attributes = True

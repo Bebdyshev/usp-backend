@@ -1,7 +1,7 @@
 """Fix JSON columns and add GIN indexes
 
 Revision ID: 93262454752a
-Revises: a055c33aee96
+Revises: None
 Create Date: 2025-09-16 10:50:21.947058
 
 """
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = '93262454752a'
-down_revision: Union[str, Sequence[str], None] = 'a055c33aee96'
+down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

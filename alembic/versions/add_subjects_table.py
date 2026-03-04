@@ -1,7 +1,7 @@
 """add_subjects_table
 
 Revision ID: add_subjects_table
-Revises: a055c33aee96
+Revises: None
 Create Date: 2025-09-22 12:00:00.000000
 
 """
@@ -11,7 +11,7 @@ from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision = 'add_subjects_table'
-down_revision = 'a055c33aee96'
+down_revision = None
 branch_labels = None
 depends_on = None
 

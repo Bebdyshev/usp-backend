@@ -1,11 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Body
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
+from sqlalchemy import and_
 from auth_utils import hash_password, verify_password, create_access_token, verify_access_token
 from config import get_db
 from schemas.models import *
 from datetime import timedelta
-from typing import List, Optional
+from typing import List, Optional, Tuple
+import re
 from routes.auth import oauth2_scheme
 
 router = APIRouter()
@@ -262,13 +264,101 @@ from fastapi import File, UploadFile
 import openpyxl
 import io
 
+class BulkUploadRowResult(BaseModel):
+    row: int
+    status: str  # "created" | "updated" | "skipped"
+    message: str
+    teacher_name: Optional[str] = None
+    class_name: Optional[str] = None
+    subject_name: Optional[str] = None
+    subject_group_name: Optional[str] = None
+
+
 class BulkUploadResult(BaseModel):
     success: bool
     total_processed: int
     created_count: int
+    updated_count: int
     error_count: int
     errors: List[dict]
     created_users: List[dict]
+    row_results: List[BulkUploadRowResult] = []
+
+
+def _parse_class_cell(cell_val) -> Tuple[Optional[str], Optional[str]]:
+    """Parse class cell (e.g. '11A', '10B') into (grade, parallel). Returns (None, None) if invalid."""
+    if cell_val is None or str(cell_val).strip() == "":
+        return None, None
+    s = str(cell_val).strip()
+    m = re.match(r"^(\d{1,2})\s*([A-Za-zА-Яа-яІі]?)\s*$", s)
+    if m:
+        grade = m.group(1)
+        parallel = m.group(2) if m.group(2) else "A"
+        return grade, parallel
+    if re.match(r"^\d{1,2}$", s):
+        return s, "A"
+    return None, None
+
+
+def _get_or_create_grade(db: Session, grade_str: str, parallel: str, user_id: int) -> Optional[GradeInDB]:
+    existing = db.query(GradeInDB).filter(
+        GradeInDB.grade == grade_str,
+        GradeInDB.parallel == parallel
+    ).first()
+    if existing:
+        return existing
+    new_grade = GradeInDB(
+        grade=grade_str,
+        parallel=parallel,
+        user_id=user_id,
+        student_count=0
+    )
+    db.add(new_grade)
+    db.commit()
+    db.refresh(new_grade)
+    return new_grade
+
+
+def _get_or_create_subject(db: Session, name: str) -> Optional[SubjectInDB]:
+    if not name or not str(name).strip():
+        return None
+    existing = db.query(SubjectInDB).filter(SubjectInDB.name == name.strip()).first()
+    if existing:
+        return existing
+    new_subject = SubjectInDB(
+        name=name.strip(),
+        applicable_parallels=[],
+        is_active=1
+    )
+    db.add(new_subject)
+    db.commit()
+    db.refresh(new_subject)
+    return new_subject
+
+
+def _get_or_create_subject_group(db: Session, grade_id: int, subject_id: int, name: str) -> Optional[object]:
+    from schemas.models import SubjectGroupInDB
+    if not name or not str(name).strip():
+        return None
+    existing = db.query(SubjectGroupInDB).filter(
+        SubjectGroupInDB.grade_id == grade_id,
+        SubjectGroupInDB.subject_id == subject_id,
+        SubjectGroupInDB.name == name.strip(),
+        SubjectGroupInDB.is_active == 1
+    ).first()
+    if existing:
+        return existing
+    new_group = SubjectGroupInDB(
+        grade_id=grade_id,
+        subject_id=subject_id,
+        name=name.strip(),
+        is_active=1
+    )
+    db.add(new_group)
+    db.commit()
+    db.refresh(new_group)
+    return new_group
+
 
 @router.post("/bulk-upload-teachers", response_model=BulkUploadResult)
 async def bulk_upload_teachers(
@@ -276,176 +366,195 @@ async def bulk_upload_teachers(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
 ):
-    """Bulk upload teachers from Excel file"""
+    """Bulk upload teachers from Excel file. Supports: ФИО, Должность, Email, Класс, Предмет, Предметная группа (11-12)"""
     admin_data = verify_access_token(token)
     if not admin_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
-    # Only admins can bulk upload
+
     if admin_data.get("type") != "admin":
         raise HTTPException(status_code=403, detail="Only admins can bulk upload users")
-    
-    # Validate file type
-    if not file.filename.endswith(('.xlsx', '.xls')):
+
+    if not file.filename.endswith((".xlsx", ".xls")):
         raise HTTPException(status_code=400, detail="File must be an Excel file (.xlsx or .xls)")
-    
+
+    creator_user = db.query(UserInDB).filter(UserInDB.email == admin_data.get("sub")).first()
+    if not creator_user:
+        creator_user = db.query(UserInDB).filter(UserInDB.id == admin_data.get("id")).first()
+    creator_id = creator_user.id if creator_user else admin_data.get("id", 1)
+
     try:
-        # Read Excel file
         contents = await file.read()
         workbook = openpyxl.load_workbook(io.BytesIO(contents))
         sheet = workbook.active
-        
+
         created_users = []
         errors = []
+        row_results = []
         total_processed = 0
-        
-        # Skip header row, start from row 2
+
         for row_idx, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
-            if not row or all(cell is None or str(cell).strip() == '' for cell in row):
-                continue  # Skip empty rows
-            
+            if not row or all(cell is None or str(cell).strip() == "" for cell in row):
+                continue
+
             total_processed += 1
-            
+            fio, position, email, class_cell, subject_cell, group_cell = None, None, None, None, None, None
+
+            if len(row) >= 7:
+                fio = str(row[1]).strip() if row[1] else None
+                position = str(row[2]).strip() if row[2] else None
+                email = str(row[3]).strip() if row[3] else None
+                class_cell = row[4]
+                subject_cell = str(row[5]).strip() if row[5] else None
+                group_cell = str(row[6]).strip() if row[6] else None
+            elif len(row) >= 6:
+                fio = str(row[1]).strip() if row[1] else None
+                position = str(row[2]).strip() if row[2] else None
+                email = str(row[3]).strip() if row[3] else None
+                class_cell = row[4]
+                subject_cell = str(row[5]).strip() if row[5] else None
+            elif len(row) >= 4:
+                fio = str(row[1]).strip() if row[1] else None
+                position = str(row[2]).strip() if row[2] else None
+                email = str(row[3]).strip() if row[3] else None
+            elif len(row) >= 3:
+                fio = str(row[0]).strip() if row[0] else None
+                position = str(row[1]).strip() if row[1] else None
+                email = str(row[2]).strip() if row[2] else None
+
+            if not fio or not email:
+                err = {"row": row_idx, "error": "Missing required fields (ФИО or Email)", "data": {"fio": fio, "email": email}}
+                errors.append(err)
+                row_results.append(BulkUploadRowResult(row=row_idx, status="skipped", message=err["error"]))
+                continue
+
+            grade_str, parallel_str = _parse_class_cell(class_cell) if class_cell is not None else (None, None)
+            subject_name = subject_cell
+            if not subject_name and position:
+                subject_keywords = {
+                    "англ": "Английский язык", "химии": "Химия", "биологии": "Биология", "каз": "Казахский язык",
+                    "рус": "Русский язык", "матем": "Математика", "физики": "Физика", "истории": "История",
+                    "географии": "География", "физ.культуры": "Физическая культура", "искусства": "Искусство",
+                    "НВП": "НВП", "ГиП": "Графика и проектирование", "информатик": "Информатика",
+                }
+                position_lower = position.lower()
+                for kw, full in subject_keywords.items():
+                    if kw in position_lower:
+                        subject_name = full
+                        break
+
+            if group_cell and grade_str:
+                try:
+                    grade_num = int(grade_str)
+                    if grade_num not in (11, 12):
+                        err = {"row": row_idx, "error": "Предметная группа допускается только для 11-12 классов", "data": {}}
+                        errors.append(err)
+                        row_results.append(BulkUploadRowResult(row=row_idx, status="skipped", message=err["error"]))
+                        continue
+                except (ValueError, TypeError):
+                    pass
+
             try:
-                # Expected columns: №, ФИО, Должность, Email
-                # Handle different possible column counts
-                fio = None
-                position = None
-                email = None
-                
-                if len(row) >= 4:
-                    # Format: №, ФИО, Должность, Email
-                    fio = str(row[1]).strip() if row[1] else None
-                    position = str(row[2]).strip() if row[2] else None
-                    email = str(row[3]).strip() if row[3] else None
-                elif len(row) >= 3:
-                    # Format: ФИО, Должность, Email
-                    fio = str(row[0]).strip() if row[0] else None
-                    position = str(row[1]).strip() if row[1] else None
-                    email = str(row[2]).strip() if row[2] else None
-                
-                if not fio or not email:
-                    errors.append({
-                        "row": row_idx,
-                        "error": "Missing required fields (ФИО or Email)",
-                        "data": {"fio": fio, "email": email}
-                    })
-                    continue
-                
-                # Check if email already exists
                 existing_user = db.query(UserInDB).filter(UserInDB.email == email).first()
                 if existing_user:
-                    errors.append({
-                        "row": row_idx,
-                        "error": "Email already exists",
-                        "data": {"fio": fio, "email": email}
-                    })
-                    continue
-                
-                # Parse FIO (assumes format: "Last First Middle" or "Last First")
-                fio_parts = fio.split()
-                last_name = fio_parts[0] if len(fio_parts) > 0 else ""
-                first_name = fio_parts[1] if len(fio_parts) > 1 else ""
-                
-                # Extract subject from position field
-                subject_name = None
-                if position:
-                    # Common subject keywords in Russian positions
-                    subject_keywords = {
-                        'англ': 'Английский язык',
-                        'химии': 'Химия',
-                        'биологии': 'Биология',
-                        'каз': 'Казахский язык',
-                        'рус': 'Русский язык',
-                        'матем': 'Математика',
-                        'физики': 'Физика',
-                        'истории': 'История',
-                        'географии': 'География',
-                        'физ.культуры': 'Физическая культура',
-                        'искусства': 'Искусство',
-                        'НВП': 'НВП'
-                    }
-                    
-                    position_lower = position.lower()
-                    for keyword, full_name in subject_keywords.items():
-                        if keyword.lower() in position_lower:
-                            subject_name = full_name
-                            break
-                
-                # Create teacher account with default password "123"
-                hashed_password = hash_password("123")
-                
-                new_teacher = UserInDB(
-                    name=fio,
-                    first_name=first_name,
-                    last_name=last_name,
-                    email=email,
-                    hashed_password=hashed_password,
-                    type="teacher"
-                )
-                
-                db.add(new_teacher)
-                db.commit()
-                db.refresh(new_teacher)
-                
-                # Create subject if extracted and doesn't exist
+                    teacher = existing_user
+                    if teacher.type != "teacher":
+                        teacher.type = "teacher"
+                        db.commit()
+                else:
+                    fio_parts = fio.split()
+                    last_name = fio_parts[0] if fio_parts else ""
+                    first_name = fio_parts[1] if len(fio_parts) > 1 else ""
+                    hashed_password = hash_password("123")
+                    teacher = UserInDB(
+                        name=fio,
+                        first_name=first_name,
+                        last_name=last_name,
+                        email=email,
+                        hashed_password=hashed_password,
+                        type="teacher",
+                    )
+                    db.add(teacher)
+                    db.commit()
+                    db.refresh(teacher)
+                    created_users.append({"id": teacher.id, "name": fio, "email": email, "position": position, "subject": subject_name})
+
+                grade_id = None
                 subject_id = None
+                subject_group_id = None
+                class_display = None
+
+                if grade_str and parallel_str:
+                    db_grade = _get_or_create_grade(db, grade_str, parallel_str, creator_id)
+                    if db_grade:
+                        grade_id = db_grade.id
+                        class_display = f"{grade_str}{parallel_str}"
+
                 if subject_name:
+                    subj = _get_or_create_subject(db, subject_name)
+                    if subj:
+                        subject_id = subj.id
+
+                if subject_id and grade_id and group_cell:
                     try:
-                        existing_subject = db.query(SubjectInDB).filter(SubjectInDB.name == subject_name).first()
-                        if not existing_subject:
-                            new_subject = SubjectInDB(
-                                name=subject_name,
-                                description=f"Автоматически создан при импорте учителя {fio}",
-                                applicable_parallels=[],
-                                is_active=1
-                            )
-                            db.add(new_subject)
-                            db.commit()
-                            db.refresh(new_subject)
-                            subject_id = new_subject.id
-                        else:
-                            subject_id = existing_subject.id
-                        
-                        # Create teacher assignment for the subject
-                        from schemas.models import TeacherAssignmentInDB
+                        grade_num = int(grade_str)
+                        if grade_num in (11, 12):
+                            sg = _get_or_create_subject_group(db, grade_id, subject_id, group_cell)
+                            if sg:
+                                subject_group_id = sg.id
+                    except (ValueError, TypeError):
+                        pass
+
+                if subject_id:
+                    filters = [
+                        TeacherAssignmentInDB.teacher_id == teacher.id,
+                        TeacherAssignmentInDB.subject_id == subject_id,
+                        TeacherAssignmentInDB.is_active == 1,
+                        TeacherAssignmentInDB.subgroup_id.is_(None),
+                    ]
+                    filters.append(TeacherAssignmentInDB.grade_id == grade_id if grade_id else TeacherAssignmentInDB.grade_id.is_(None))
+                    filters.append(TeacherAssignmentInDB.subject_group_id == subject_group_id if subject_group_id else TeacherAssignmentInDB.subject_group_id.is_(None))
+                    existing_assignment = db.query(TeacherAssignmentInDB).filter(and_(*filters)).first()
+                    if not existing_assignment:
                         new_assignment = TeacherAssignmentInDB(
-                            teacher_id=new_teacher.id,
+                            teacher_id=teacher.id,
                             subject_id=subject_id,
-                            is_active=1
+                            grade_id=grade_id,
+                            subject_group_id=subject_group_id,
+                            subgroup_id=None,
+                            is_active=1,
                         )
                         db.add(new_assignment)
                         db.commit()
-                    except Exception as subject_error:
-                        # Non-fatal: teacher created but subject assignment failed
-                        pass
-                
-                created_users.append({
-                    "id": new_teacher.id,
-                    "name": fio,
-                    "email": email,
-                    "position": position,
-                    "subject": subject_name
-                })
 
-                
+                status_msg = "updated" if existing_user else "created"
+                row_results.append(BulkUploadRowResult(
+                    row=row_idx,
+                    status=status_msg,
+                    message="OK",
+                    teacher_name=fio,
+                    class_name=class_display,
+                    subject_name=subject_name,
+                    subject_group_name=group_cell if group_cell else None,
+                ))
+
             except Exception as e:
                 db.rollback()
-                errors.append({
-                    "row": row_idx,
-                    "error": str(e),
-                    "data": {"fio": fio if 'fio' in locals() else None, "email": email if 'email' in locals() else None}
-                })
-        
+                err = {"row": row_idx, "error": str(e), "data": {"fio": fio, "email": email}}
+                errors.append(err)
+                row_results.append(BulkUploadRowResult(row=row_idx, status="skipped", message=str(e)))
+
+        updated_count = sum(1 for r in row_results if r.status == "updated")
         return BulkUploadResult(
             success=len(errors) == 0,
             total_processed=total_processed,
             created_count=len(created_users),
+            updated_count=updated_count,
             error_count=len(errors),
             errors=errors,
-            created_users=created_users
+            created_users=created_users,
+            row_results=row_results,
         )
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to process Excel file: {str(e)}")
 

@@ -8,6 +8,7 @@ from routes.classes import router as classes_router
 from routes.users import router as users_router
 from routes.subjects import router as subjects_router
 from routes.subgroups import router as subgroups_router
+from routes.subject_groups import router as subject_groups_router
 from routes.assignments import router as assignments_router
 from routes.curators import router as curators_router
 from routes.discipline import router as discipline_router
@@ -77,6 +78,7 @@ app.include_router(classes_router, prefix="/classes", tags=["Classes"])
 app.include_router(users_router, prefix="/users", tags=["Users"])
 app.include_router(subjects_router, prefix="/subjects", tags=["Subjects"])
 app.include_router(subgroups_router, prefix="/subgroups", tags=["Subgroups"])
+app.include_router(subject_groups_router, prefix="/subject-groups", tags=["Subject Groups"])
 app.include_router(assignments_router, prefix="/assignments", tags=["Teacher Assignments"])
 app.include_router(curators_router, prefix="/curators", tags=["Curators"])
 app.include_router(discipline_router, prefix="/discipline", tags=["Discipline"])

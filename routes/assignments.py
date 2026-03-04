@@ -15,6 +15,7 @@ async def get_teacher_assignments(
     subject_id: Optional[int] = Query(None),
     teacher_id: Optional[int] = Query(None),
     subgroup_id: Optional[int] = Query(None),
+    subject_group_id: Optional[int] = Query(None),
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
 ):
@@ -22,10 +23,9 @@ async def get_teacher_assignments(
     user_data = verify_access_token(token)
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
+
     query = db.query(TeacherAssignmentInDB).filter(TeacherAssignmentInDB.is_active == 1)
-    
-    # Apply filters
+
     if grade_id:
         query = query.filter(TeacherAssignmentInDB.grade_id == grade_id)
     if subject_id:
@@ -34,33 +34,37 @@ async def get_teacher_assignments(
         query = query.filter(TeacherAssignmentInDB.teacher_id == teacher_id)
     if subgroup_id:
         query = query.filter(TeacherAssignmentInDB.subgroup_id == subgroup_id)
-    
+    if subject_group_id:
+        query = query.filter(TeacherAssignmentInDB.subject_group_id == subject_group_id)
+
     assignments = query.all()
-    
-    # Enrich with related data
+
     result = []
     for assignment in assignments:
         teacher = db.query(UserInDB).filter(UserInDB.id == assignment.teacher_id).first()
         subject = db.query(SubjectInDB).filter(SubjectInDB.id == assignment.subject_id).first()
         grade = db.query(GradeInDB).filter(GradeInDB.id == assignment.grade_id).first() if assignment.grade_id else None
         subgroup = db.query(SubgroupInDB).filter(SubgroupInDB.id == assignment.subgroup_id).first() if assignment.subgroup_id else None
-        
+        subject_group = db.query(SubjectGroupInDB).filter(SubjectGroupInDB.id == assignment.subject_group_id).first() if assignment.subject_group_id else None
+
         assignment_data = {
             "id": assignment.id,
             "teacher_id": assignment.teacher_id,
             "subject_id": assignment.subject_id,
             "grade_id": assignment.grade_id,
             "subgroup_id": assignment.subgroup_id,
+            "subject_group_id": assignment.subject_group_id,
             "is_active": assignment.is_active,
             "created_at": assignment.created_at,
             "updated_at": assignment.updated_at,
             "teacher_name": teacher.name if teacher else None,
             "subject_name": subject.name if subject else None,
-            "grade_name": grade.grade if grade else None,
-            "subgroup_name": subgroup.name if subgroup else None
+            "grade_name": f"{grade.grade}{grade.parallel}" if grade else None,
+            "subgroup_name": subgroup.name if subgroup else None,
+            "subject_group_name": subject_group.name if subject_group else None
         }
         result.append(assignment_data)
-    
+
     return result
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
@@ -111,38 +115,60 @@ async def create_teacher_assignment(
         ).first()
         if not subgroup:
             raise HTTPException(status_code=404, detail="Subgroup not found")
-        
-        # If subgroup is provided, grade_id should match subgroup's grade
+
         if assignment.grade_id and subgroup.grade_id != assignment.grade_id:
-            raise HTTPException(
-                status_code=400, 
-                detail="Subgroup does not belong to the specified grade"
-            )
-        
-        # Set grade_id from subgroup if not provided
+            raise HTTPException(status_code=400, detail="Subgroup does not belong to the specified grade")
+
         if not assignment.grade_id:
             assignment.grade_id = subgroup.grade_id
-    
-    # Check for existing assignment (prevent duplicates)
+
+    # Validate subject_group if provided (only for grades 11-12)
+    if assignment.subject_group_id:
+        sg = db.query(SubjectGroupInDB).filter(
+            SubjectGroupInDB.id == assignment.subject_group_id,
+            SubjectGroupInDB.is_active == 1
+        ).first()
+        if not sg:
+            raise HTTPException(status_code=404, detail="Subject group not found")
+        grade = db.query(GradeInDB).filter(GradeInDB.id == sg.grade_id).first()
+        if grade:
+            try:
+                grade_num = int(grade.grade) if (grade.grade and str(grade.grade).isdigit()) else None
+                if grade_num not in (11, 12):
+                    raise HTTPException(status_code=400, detail="Subject groups are only allowed for grades 11-12")
+            except (ValueError, TypeError):
+                raise HTTPException(status_code=400, detail="Subject groups are only allowed for grades 11-12")
+        if assignment.grade_id and sg.grade_id != assignment.grade_id:
+            raise HTTPException(status_code=400, detail="Subject group does not belong to the specified grade")
+        if sg.subject_id != assignment.subject_id:
+            raise HTTPException(status_code=400, detail="Subject group does not match the assignment subject")
+        if not assignment.grade_id:
+            assignment.grade_id = sg.grade_id
+
+    grade_match = TeacherAssignmentInDB.grade_id == assignment.grade_id if assignment.grade_id else TeacherAssignmentInDB.grade_id.is_(None)
+    subgroup_match = TeacherAssignmentInDB.subgroup_id == assignment.subgroup_id if assignment.subgroup_id else TeacherAssignmentInDB.subgroup_id.is_(None)
+    sg_match = TeacherAssignmentInDB.subject_group_id == assignment.subject_group_id if assignment.subject_group_id else TeacherAssignmentInDB.subject_group_id.is_(None)
+
     existing_assignment = db.query(TeacherAssignmentInDB).filter(
-        TeacherAssignmentInDB.teacher_id == assignment.teacher_id,
-        TeacherAssignmentInDB.subject_id == assignment.subject_id,
-        TeacherAssignmentInDB.grade_id == assignment.grade_id,
-        TeacherAssignmentInDB.subgroup_id == assignment.subgroup_id,
-        TeacherAssignmentInDB.is_active == 1
-    ).first()
-    
-    if existing_assignment:
-        raise HTTPException(
-            status_code=400,
-            detail="This teacher assignment already exists"
+        and_(
+            TeacherAssignmentInDB.teacher_id == assignment.teacher_id,
+            TeacherAssignmentInDB.subject_id == assignment.subject_id,
+            grade_match,
+            subgroup_match,
+            sg_match,
+            TeacherAssignmentInDB.is_active == 1
         )
-    
+    ).first()
+
+    if existing_assignment:
+        raise HTTPException(status_code=400, detail="This teacher assignment already exists")
+
     db_assignment = TeacherAssignmentInDB(
         teacher_id=assignment.teacher_id,
         subject_id=assignment.subject_id,
         grade_id=assignment.grade_id,
-        subgroup_id=assignment.subgroup_id
+        subgroup_id=assignment.subgroup_id,
+        subject_group_id=assignment.subject_group_id
     )
     
     db.add(db_assignment)
@@ -259,29 +285,31 @@ async def get_assignments_by_grade(
         TeacherAssignmentInDB.is_active == 1
     ).all()
     
-    # Enrich with related data
     result = []
     for assignment in assignments:
         teacher = db.query(UserInDB).filter(UserInDB.id == assignment.teacher_id).first()
         subject = db.query(SubjectInDB).filter(SubjectInDB.id == assignment.subject_id).first()
         subgroup = db.query(SubgroupInDB).filter(SubgroupInDB.id == assignment.subgroup_id).first() if assignment.subgroup_id else None
-        
+        subject_group = db.query(SubjectGroupInDB).filter(SubjectGroupInDB.id == assignment.subject_group_id).first() if assignment.subject_group_id else None
+
         assignment_data = {
             "id": assignment.id,
             "teacher_id": assignment.teacher_id,
             "subject_id": assignment.subject_id,
             "grade_id": assignment.grade_id,
             "subgroup_id": assignment.subgroup_id,
+            "subject_group_id": assignment.subject_group_id,
             "is_active": assignment.is_active,
             "created_at": assignment.created_at,
             "updated_at": assignment.updated_at,
             "teacher_name": teacher.name if teacher else None,
             "subject_name": subject.name if subject else None,
-            "grade_name": grade.grade,
-            "subgroup_name": subgroup.name if subgroup else None
+            "grade_name": f"{grade.grade}{grade.parallel}",
+            "subgroup_name": subgroup.name if subgroup else None,
+            "subject_group_name": subject_group.name if subject_group else None
         }
         result.append(assignment_data)
-    
+
     return result
 
 
