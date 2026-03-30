@@ -43,17 +43,26 @@ def _find_or_create_grade_for_students_import(
     parallel: str,
     creator_id: int
 ) -> GradeInDB:
+    grade_clean = str(grade).strip()
+    parallel_clean = str(parallel).strip().upper()
+    grade_compact = f"{grade_clean}{parallel_clean}"
+    grade_spaced = f"{grade_clean} {parallel_clean}"
+
     existing_grade = db.query(GradeInDB).filter(
-        GradeInDB.grade == grade,
-        GradeInDB.parallel == parallel
+        GradeInDB.parallel == parallel_clean,
+        or_(
+            GradeInDB.grade == grade_clean,
+            GradeInDB.grade == grade_compact,
+            GradeInDB.grade == grade_spaced
+        )
     ).first()
     if existing_grade:
         return existing_grade
 
-    grade_label = f"{grade}{parallel}"
+    grade_label = grade_compact
     new_grade = GradeInDB(
         grade=grade_label,
-        parallel=parallel,
+        parallel=parallel_clean,
         user_id=creator_id,
         student_count=0
     )
