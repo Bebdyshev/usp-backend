@@ -1070,6 +1070,11 @@ async def update_student(
     student = db.query(StudentInDB).filter(StudentInDB.id == student_id).first()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
+
+    if update_data.grade_id is not None:
+        grade_exists = db.query(GradeInDB).filter(GradeInDB.id == update_data.grade_id).first()
+        if not grade_exists:
+            raise HTTPException(status_code=404, detail="Grade not found")
     
     # Update only the fields that are provided
     update_dict = update_data.dict(exclude_unset=True)

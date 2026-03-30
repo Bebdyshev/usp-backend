@@ -247,6 +247,7 @@ class UpdateStudent(BaseModel):
     phone: Optional[str] = None
     parent_contact: Optional[str] = None
     is_active: Optional[int] = None
+    grade_id: Optional[int] = None
 
 class StudentResponse(BaseModel):
     id: int
