@@ -16,6 +16,186 @@ from typing import Optional, List
 
 router = APIRouter()
 
+def _extract_grade_parallel_from_class_text(class_text: str) -> tuple[Optional[str], Optional[str]]:
+    if not class_text:
+        return None, None
+
+    normalized = str(class_text).strip().replace(" ", "")
+    match = pd.Series([normalized]).str.extract(r"^(\d{1,2})([A-Za-zА-Яа-яЁёІіҢңҒғҚқӨөҰұҮүҺһ]+)?$").iloc[0]
+    grade_part = match[0] if pd.notna(match[0]) else None
+    parallel_part = match[1] if pd.notna(match[1]) and match[1] else "A"
+    return grade_part, parallel_part
+
+
+def _normalize_student_name(value: object) -> str:
+    if value is None:
+        return ""
+
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return ""
+    return " ".join(text.split())
+
+
+def _find_or_create_grade_for_students_import(
+    db: Session,
+    grade: str,
+    parallel: str,
+    creator_id: int
+) -> GradeInDB:
+    existing_grade = db.query(GradeInDB).filter(
+        GradeInDB.grade == grade,
+        GradeInDB.parallel == parallel
+    ).first()
+    if existing_grade:
+        return existing_grade
+
+    grade_label = f"{grade}{parallel}"
+    new_grade = GradeInDB(
+        grade=grade_label,
+        parallel=parallel,
+        user_id=creator_id,
+        student_count=0
+    )
+    db.add(new_grade)
+    db.commit()
+    db.refresh(new_grade)
+    return new_grade
+
+
+@router.post("/students/bulk-upload", status_code=status.HTTP_201_CREATED)
+async def bulk_upload_students(
+    file: UploadFile = File(...),
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """
+    Bulk upload students from Excel.
+    Expected format supports these columns:
+    - "Класс и литер" (required)
+    - "ФИО" (required)
+    Other columns are ignored.
+    """
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    if user_data.get("type") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can bulk upload students")
+
+    filename = (file.filename or "").lower()
+    if not filename.endswith((".xlsx", ".xls")):
+        raise HTTPException(status_code=400, detail="Only Excel files (.xlsx, .xls) are allowed")
+
+    admin_user = db.query(UserInDB).filter(UserInDB.email == user_data.get("sub")).first()
+    if not admin_user:
+        admin_user = db.query(UserInDB).filter(UserInDB.id == user_data.get("id")).first()
+    creator_id = admin_user.id if admin_user else user_data.get("id", 1)
+
+    file_content = await file.read()
+    if not file_content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    try:
+        dataframe = pd.read_excel(BytesIO(file_content), sheet_name=0, header=1)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to read Excel: {str(exc)}")
+
+    if dataframe.empty:
+        raise HTTPException(status_code=400, detail="Excel file has no data rows")
+
+    # Handle merged cells in "Класс и литер"
+    dataframe = dataframe.fillna("")
+    dataframe.columns = [str(column).strip() for column in dataframe.columns]
+
+    class_column = next(
+        (column for column in dataframe.columns if "класс" in column.lower() and "литер" in column.lower()),
+        None
+    )
+    name_column = next(
+        (column for column in dataframe.columns if "фио" in column.lower()),
+        None
+    )
+
+    if not class_column or not name_column:
+        raise HTTPException(
+            status_code=400,
+            detail="Excel must contain columns 'Класс и литер' and 'ФИО'"
+        )
+
+    dataframe[class_column] = dataframe[class_column].replace("", pd.NA).ffill()
+
+    created_count = 0
+    updated_count = 0
+    skipped_count = 0
+    errors: List[dict] = []
+
+    for row_index, row in dataframe.iterrows():
+        excel_row_number = int(row_index) + 3
+        raw_class_value = row.get(class_column)
+        raw_name_value = row.get(name_column)
+
+        student_name = _normalize_student_name(raw_name_value)
+        if not student_name:
+            skipped_count += 1
+            continue
+
+        grade_part, parallel_part = _extract_grade_parallel_from_class_text(str(raw_class_value))
+        if not grade_part or not parallel_part:
+            errors.append({
+                "row": excel_row_number,
+                "error": "Invalid class format in 'Класс и литер'",
+                "data": {"class": str(raw_class_value), "name": student_name}
+            })
+            continue
+
+        try:
+            db_grade = _find_or_create_grade_for_students_import(
+                db=db,
+                grade=grade_part,
+                parallel=parallel_part,
+                creator_id=creator_id
+            )
+
+            existing_student = db.query(StudentInDB).filter(
+                StudentInDB.grade_id == db_grade.id,
+                StudentInDB.name == student_name
+            ).first()
+
+            if existing_student:
+                if existing_student.is_active != 1:
+                    existing_student.is_active = 1
+                    updated_count += 1
+                else:
+                    skipped_count += 1
+            else:
+                db_student = StudentInDB(
+                    name=student_name,
+                    grade_id=db_grade.id,
+                    is_active=1
+                )
+                db.add(db_student)
+                created_count += 1
+        except Exception as exc:
+            db.rollback()
+            errors.append({
+                "row": excel_row_number,
+                "error": str(exc),
+                "data": {"class": str(raw_class_value), "name": student_name}
+            })
+
+    db.commit()
+
+    return {
+        "success": len(errors) == 0,
+        "total_processed": int(created_count + updated_count + skipped_count + len(errors)),
+        "created_count": int(created_count),
+        "updated_count": int(updated_count),
+        "skipped_count": int(skipped_count),
+        "error_count": int(len(errors)),
+        "errors": errors
+    }
+
 @router.post("/send/")
 async def send_excel_as_csv_to_openai(
     grade: str = Form(...),
