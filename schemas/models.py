@@ -27,6 +27,7 @@ class UserInDB(Base):
     grades = relationship("GradeInDB", foreign_keys="GradeInDB.user_id", back_populates="user", cascade="all, delete-orphan")
     curated_grades = relationship("GradeInDB", foreign_keys="GradeInDB.curator_id", back_populates="curator")
     teacher_assignments = relationship("TeacherAssignmentInDB", foreign_keys="TeacherAssignmentInDB.teacher_id", back_populates="teacher")
+    owned_subject_groups = relationship("SubjectGroupInDB", foreign_keys="SubjectGroupInDB.owner_teacher_id", back_populates="owner_teacher")
 
 class GradeInDB(Base):
     __tablename__ = "grades"
@@ -400,11 +401,13 @@ class SubjectGroupInDB(Base):
     subject_id = Column(Integer, ForeignKey("subjects.id", ondelete="CASCADE"), nullable=False)
     name = Column(String(100), nullable=False, index=True)
     is_active = Column(Integer, default=1, index=True)
+    owner_teacher_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     grade = relationship("GradeInDB", back_populates="subject_groups")
     subject = relationship("SubjectInDB", back_populates="subject_groups")
+    owner_teacher = relationship("UserInDB", foreign_keys=[owner_teacher_id], back_populates="owned_subject_groups")
     teacher_assignments = relationship("TeacherAssignmentInDB", back_populates="subject_group")
     student_memberships = relationship("StudentSubjectGroupMembershipInDB", back_populates="subject_group", cascade="all, delete-orphan")
 
@@ -555,6 +558,39 @@ class SubjectGroupResponse(BaseModel):
     updated_at: datetime
     grade_name: Optional[str] = None
     subject_name: Optional[str] = None
+    owner_teacher_id: Optional[int] = None
+
+    class Config:
+        from_attributes = True
+
+
+class CreateTeacherSubjectGroup(BaseModel):
+    subject_id: int
+    name: str
+    anchor_grade_id: int
+
+
+class SubjectGroupMembersBulk(BaseModel):
+    student_ids: List[int]
+
+
+class SubjectGroupMemberResponse(BaseModel):
+    id: int
+    student_id: int
+    name: Optional[str] = None
+    grade_id: Optional[int] = None
+    grade_name: Optional[str] = None
+    is_active: int
+
+    class Config:
+        from_attributes = True
+
+
+class SubjectGroupParallelStudentItem(BaseModel):
+    id: int
+    name: Optional[str] = None
+    grade_id: int
+    grade_name: Optional[str] = None
 
     class Config:
         from_attributes = True

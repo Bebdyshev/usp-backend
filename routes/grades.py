@@ -1666,13 +1666,31 @@ async def get_teacher_students(
     
     # Get students based on filters
     student_query = db.query(StudentInDB).filter(StudentInDB.is_active == 1)
-    
-    if grade_id:
-        student_query = student_query.filter(StudentInDB.grade_id == grade_id)
-    
-    if subgroup_id:
-        student_query = student_query.filter(StudentInDB.subgroup_id == subgroup_id)
-    
+
+    if subject_group_id:
+        sg = db.query(SubjectGroupInDB).filter(SubjectGroupInDB.id == subject_group_id).first()
+        if not sg:
+            raise HTTPException(status_code=404, detail="Subject group not found")
+        if sg.subject_id != subject_id:
+            raise HTTPException(status_code=400, detail="Subject does not match subject group")
+        member_ids = [
+            row[0]
+            for row in db.query(StudentSubjectGroupMembershipInDB.student_id)
+            .filter(
+                StudentSubjectGroupMembershipInDB.subject_group_id == subject_group_id,
+                StudentSubjectGroupMembershipInDB.is_active == 1,
+            )
+            .all()
+        ]
+        if not member_ids:
+            return []
+        student_query = student_query.filter(StudentInDB.id.in_(member_ids))
+    else:
+        if grade_id:
+            student_query = student_query.filter(StudentInDB.grade_id == grade_id)
+        if subgroup_id:
+            student_query = student_query.filter(StudentInDB.subgroup_id == subgroup_id)
+
     students = student_query.all()
     
     # Get subject info
