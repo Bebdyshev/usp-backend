@@ -96,8 +96,59 @@ async def bulk_upload_students(
     if not file_content:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
+    def _find_header_row_index(preview: pd.DataFrame) -> Optional[int]:
+        if preview.empty:
+            return None
+
+        def has_token(value: object, token: str) -> bool:
+            if value is None:
+                return False
+            text = str(value).strip().lower()
+            if not text or text == "nan":
+                return False
+            return token in text
+
+        for idx in range(len(preview.index)):
+            row = preview.iloc[idx].tolist()
+            has_name = any(has_token(v, "фио") for v in row)
+            has_class = any(has_token(v, "класс") for v in row)
+            has_liter = any(has_token(v, "литер") for v in row) or any(has_token(v, "паралл") for v in row) or any(has_token(v, "букв") for v in row)
+            if has_name and (has_class or has_liter):
+                return int(idx)
+        return None
+
+    header_row: Optional[int] = None
     try:
-        dataframe = pd.read_excel(BytesIO(file_content), sheet_name=0, header=1)
+        excel = pd.ExcelFile(BytesIO(file_content))
+        chosen_sheet: Optional[str] = None
+        chosen_header: Optional[int] = None
+
+        for sheet in excel.sheet_names:
+            preview = pd.read_excel(excel, sheet_name=sheet, header=None, nrows=30)
+            candidate_header = _find_header_row_index(preview)
+            if candidate_header is None:
+                continue
+            df_candidate = pd.read_excel(excel, sheet_name=sheet, header=candidate_header)
+            if df_candidate.empty:
+                continue
+            cols = [str(c).strip().lower() for c in df_candidate.columns]
+            has_name = any("фио" in c for c in cols)
+            has_class_and_liter = any(("класс" in c and "литер" in c) for c in cols)
+            has_class = any("класс" in c for c in cols)
+            if has_name and (has_class_and_liter or has_class):
+                chosen_sheet = sheet
+                chosen_header = candidate_header
+                break
+
+        if chosen_sheet is None:
+            preview0 = pd.read_excel(excel, sheet_name=excel.sheet_names[0], header=None, nrows=30)
+            chosen_sheet = excel.sheet_names[0]
+            chosen_header = _find_header_row_index(preview0)
+            if chosen_header is None:
+                chosen_header = 1
+
+        header_row = chosen_header
+        dataframe = pd.read_excel(excel, sheet_name=chosen_sheet, header=chosen_header)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Failed to read Excel: {str(exc)}")
 
@@ -112,18 +163,35 @@ async def bulk_upload_students(
         (column for column in dataframe.columns if "класс" in column.lower() and "литер" in column.lower()),
         None
     )
+    class_number_column = next(
+        (column for column in dataframe.columns if "класс" in column.lower() and "литер" not in column.lower() and "паралл" not in column.lower()),
+        None
+    )
+    liter_column = next(
+        (
+            column
+            for column in dataframe.columns
+            if ("литер" in column.lower() or "паралл" in column.lower() or "букв" in column.lower())
+        ),
+        None,
+    )
     name_column = next(
         (column for column in dataframe.columns if "фио" in column.lower()),
         None
     )
 
-    if not class_column or not name_column:
+    if not name_column or (not class_column and not class_number_column):
         raise HTTPException(
             status_code=400,
-            detail="Excel must contain columns 'Класс и литер' and 'ФИО'"
+            detail=f"Excel must contain student name and class columns. Expected 'ФИО' and either 'Класс и литер' or separate class columns. Available columns: {list(dataframe.columns)}"
         )
 
-    dataframe[class_column] = dataframe[class_column].replace("", pd.NA).ffill()
+    if class_column:
+        dataframe[class_column] = dataframe[class_column].replace("", pd.NA).ffill()
+    if class_number_column:
+        dataframe[class_number_column] = dataframe[class_number_column].replace("", pd.NA).ffill()
+    if liter_column:
+        dataframe[liter_column] = dataframe[liter_column].replace("", pd.NA).ffill()
 
     created_count = 0
     updated_count = 0
@@ -131,8 +199,12 @@ async def bulk_upload_students(
     errors: List[dict] = []
 
     for row_index, row in dataframe.iterrows():
-        excel_row_number = int(row_index) + 3
-        raw_class_value = row.get(class_column)
+        excel_row_number = int(row_index) + (int(header_row) + 2 if "header_row" in locals() and header_row is not None else 3)
+        raw_class_value = row.get(class_column) if class_column else None
+        if raw_class_value is None:
+            base_class = row.get(class_number_column) if class_number_column else ""
+            base_liter = row.get(liter_column) if liter_column else ""
+            raw_class_value = f"{base_class}{base_liter}".strip()
         raw_name_value = row.get(name_column)
 
         student_name = _normalize_student_name(raw_name_value)
