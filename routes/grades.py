@@ -13,6 +13,7 @@ from io import BytesIO, StringIO
 from services.analyze import analyze_excel
 from services.excel_parser import parse_excel_grades, generate_excel_template
 from typing import Optional, List
+import re
 
 router = APIRouter()
 
@@ -25,6 +26,29 @@ def _extract_grade_parallel_from_class_text(class_text: str) -> tuple[Optional[s
     grade_part = match[0] if pd.notna(match[0]) else None
     parallel_part = match[1] if pd.notna(match[1]) and match[1] else "A"
     return grade_part, parallel_part
+
+
+def _normalize_grade_key(grade_text: str, parallel_text: Optional[str]) -> tuple[str, str, str]:
+    grade_raw = str(grade_text or "").strip()
+    parallel_raw = str(parallel_text or "").strip().upper()
+
+    compact_grade = re.sub(r"\s+", "", grade_raw)
+    match = re.match(r"^(\d{1,2})([A-Za-zА-Яа-яЁёІіҢңҒғҚқӨөҰұҮүҺһ]?)$", compact_grade)
+    if match:
+        num = match.group(1)
+        letter = (match.group(2) or parallel_raw).upper()
+        canonical = f"{num}{letter}" if letter else num
+        return canonical, num, letter
+
+    num_match = re.match(r"^(\d{1,2})", grade_raw)
+    if num_match:
+        num = num_match.group(1)
+        letter = parallel_raw
+        canonical = f"{num}{letter}" if letter else num
+        return canonical, num, letter
+
+    fallback = f"{grade_raw} {parallel_raw}".strip()
+    return fallback, grade_raw, parallel_raw
 
 
 def _normalize_student_name(value: object) -> str:
@@ -594,7 +618,7 @@ async def get_all_grades(
     
     grades = grades_query.all()
     
-    result = []
+    grouped: dict[str, dict] = {}
     for grade in grades:
         # Count actual students in this grade
         actual_student_count = db.query(func.count(StudentInDB.id)).filter(StudentInDB.grade_id == grade.id).scalar()
@@ -613,17 +637,34 @@ async def get_all_grades(
                     "shanyrak": curator.shanyrak
                 }
         
-        result.append({
+        canonical, _, canonical_parallel = _normalize_grade_key(grade.grade, grade.parallel)
+        existing = grouped.get(canonical)
+        row_payload = {
             "id": grade.id,
-            "grade": grade.grade,
-            "parallel": grade.parallel,
+            "grade": canonical,
+            "parallel": canonical_parallel or grade.parallel,
             "curator_id": grade.curator_id,
             "curator_name": grade.curator_name,
-            "student_count": grade.student_count,
-            "actual_student_count": actual_student_count,
+            "student_count": int(grade.student_count or 0),
+            "actual_student_count": int(actual_student_count or 0),
             "curator_info": curator_info
-        })
-    
+        }
+
+        if not existing:
+            grouped[canonical] = row_payload
+            continue
+
+        existing["student_count"] = int(existing.get("student_count", 0)) + int(row_payload["student_count"])
+        existing["actual_student_count"] = int(existing.get("actual_student_count", 0)) + int(row_payload["actual_student_count"])
+
+        should_replace_primary = row_payload["actual_student_count"] > int(existing.get("actual_student_count", 0))
+        if should_replace_primary:
+            row_payload["student_count"] = existing["student_count"]
+            row_payload["actual_student_count"] = existing["actual_student_count"]
+            grouped[canonical] = row_payload
+
+    result = list(grouped.values())
+    result.sort(key=lambda item: _normalize_grade_key(item["grade"], item["parallel"])[0])
     return result
 
 @router.get("/curators", response_model=List[dict])
