@@ -61,6 +61,20 @@ def _normalize_student_name(value: object) -> str:
     return " ".join(text.split())
 
 
+def _find_existing_student_by_name_grade(
+    db: Session,
+    grade_id: int,
+    student_name: str
+) -> Optional[StudentInDB]:
+    normalized_name = _normalize_student_name(student_name)
+    if not normalized_name:
+        return None
+    return db.query(StudentInDB).filter(
+        StudentInDB.grade_id == grade_id,
+        func.lower(func.trim(StudentInDB.name)) == normalized_name.lower()
+    ).first()
+
+
 def _find_or_create_grade_for_students_import(
     db: Session,
     grade: str,
@@ -262,10 +276,11 @@ async def bulk_upload_students(
                 creator_id=creator_id
             )
 
-            existing_student = db.query(StudentInDB).filter(
-                StudentInDB.grade_id == db_grade.id,
-                StudentInDB.name == student_name
-            ).first()
+            existing_student = _find_existing_student_by_name_grade(
+                db=db,
+                grade_id=db_grade.id,
+                student_name=student_name
+            )
 
             if existing_student:
                 if existing_student.is_active != 1:
@@ -381,10 +396,11 @@ async def send_excel_as_csv_to_openai(
             print('danger level', danger_level)
 
             # Ищем студента в БД по имени и классу
-            db_student = db.query(StudentInDB).filter(
-                StudentInDB.name == student_name, 
-                StudentInDB.grade_id == db_grade.id
-            ).first()
+            db_student = _find_existing_student_by_name_grade(
+                db=db,
+                grade_id=db_grade.id,
+                student_name=student_name
+            )
 
             if not db_student:
                 db_student = StudentInDB(name=student_name, grade_id=db_grade.id) 
@@ -1324,10 +1340,11 @@ async def create_student(
         raise HTTPException(status_code=404, detail="Grade not found")
     
     # Check if student with this name already exists in this grade
-    existing_student = db.query(StudentInDB).filter(
-        StudentInDB.name == student_data.name,
-        StudentInDB.grade_id == grade_id
-    ).first()
+    existing_student = _find_existing_student_by_name_grade(
+        db=db,
+        grade_id=grade_id,
+        student_name=student_data.name
+    )
     
     if existing_student:
         raise HTTPException(status_code=400, detail="Student with this name already exists in this grade")
@@ -2040,10 +2057,11 @@ async def upload_excel_grades(
                 danger_distribution[danger_level] += 1
                 
                 # Find or create student
-                db_student = db.query(StudentInDB).filter(
-                    StudentInDB.name == student_name,
-                    StudentInDB.grade_id == grade_id
-                ).first()
+                db_student = _find_existing_student_by_name_grade(
+                    db=db,
+                    grade_id=grade_id,
+                    student_name=student_name
+                )
                 
                 if not db_student:
                     db_student = StudentInDB(
