@@ -524,6 +524,7 @@ def get_class_data(
                 if danger_count > 0:
                     danger_level = round(overall_danger_level / danger_count)
 
+                canonical, _, _ = _normalize_grade_key(grade.grade, grade.parallel)
                 student_info_list.append({
                     "id": student.id,
                     "student_name": student.name,
@@ -535,13 +536,15 @@ def get_class_data(
                     "avg_percentage": avg_percentage,
                     "danger_level": danger_level,
                     "delta_percentage": delta_percentage,
-                    "class_liter": grade.grade,  
+                    "class_liter": canonical,
+                    "grade_id": grade.id,
                 })
-                
+
+            grade_canonical, _, _ = _normalize_grade_key(grade.grade, grade.parallel)
             class_data.append({
                 "curator_name": grade.curator_name,
                 "subject_name": subject,
-                "grade_liter": grade.grade,
+                "grade_liter": grade_canonical,
                 "class": student_info_list
             })
         
@@ -594,6 +597,7 @@ def get_students_by_danger_level(
                 for score in student_scores:
                     if score.danger_level == level:
                         subject_name = score.subject_name  # Обновляем subject_name
+                        canonical, _, _ = _normalize_grade_key(grade.grade, grade.parallel)
                         student_info_list.append({
                             "id": student.id,
                             "student_name": student.name,
@@ -601,14 +605,16 @@ def get_students_by_danger_level(
                             "predicted_score": score.predicted_scores,
                             "danger_level": score.danger_level,
                             "delta_percentage": score.delta_percentage,
-                            "class_liter": grade.grade,
+                            "class_liter": canonical,
+                            "grade_id": grade.id,
                         })
-            
+
             if student_info_list:
+                grade_canonical, _, _ = _normalize_grade_key(grade.grade, grade.parallel)
                 class_data.append({
                     "curator_name": grade.curator_name,
                     "subject_name": subject_name,
-                    "grade_liter": grade.grade,
+                    "grade_liter": grade_canonical,
                     "class": student_info_list
                 })
         
