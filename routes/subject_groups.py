@@ -22,15 +22,16 @@ def _grade_allows_subject_groups(grade: GradeInDB) -> bool:
     return p in (11, 12)
 
 
+def _canonical_grade_name(grade: GradeInDB) -> str:
+    from routes.grades import _normalize_grade_key
+    canonical, _, _ = _normalize_grade_key(grade.grade, grade.parallel)
+    return canonical
+
+
 def _serialize_subject_group(db: Session, g: SubjectGroupInDB) -> dict:
     grade = db.query(GradeInDB).filter(GradeInDB.id == g.grade_id).first()
     subject = db.query(SubjectInDB).filter(SubjectInDB.id == g.subject_id).first()
-    grade_name = None
-    if grade:
-        if grade.parallel and grade.grade and str(grade.parallel) in str(grade.grade):
-            grade_name = f"{grade.grade}"
-        else:
-            grade_name = f"{grade.grade} {grade.parallel}".strip()
+    grade_name = _canonical_grade_name(grade) if grade else None
     return {
         "id": g.id,
         "grade_id": g.grade_id,
@@ -437,16 +438,13 @@ async def get_subject_group_members(
     for m in rows:
         st = db.query(StudentInDB).filter(StudentInDB.id == m.student_id).first()
         g = db.query(GradeInDB).filter(GradeInDB.id == st.grade_id).first() if st else None
-        gn = None
-        if g:
-            gn = f"{g.grade}{g.parallel}" if g.parallel and g.grade and str(g.parallel) in str(g.grade) else f"{g.grade} {g.parallel}".strip()
         out.append(
             {
                 "id": m.id,
                 "student_id": m.student_id,
                 "name": st.name if st else None,
                 "grade_id": st.grade_id if st else None,
-                "grade_name": gn,
+                "grade_name": _canonical_grade_name(g) if g else None,
                 "is_active": m.is_active,
             }
         )
@@ -555,9 +553,7 @@ async def remove_subject_group_member(
 
 
 def _grade_display_name(g: GradeInDB) -> str:
-    if g.parallel and g.grade and str(g.parallel) in str(g.grade):
-        return f"{g.grade}"
-    return f"{g.grade} {g.parallel}".strip()
+    return _canonical_grade_name(g)
 
 
 @router.get("/{group_id}/parallel-students", response_model=List[SubjectGroupParallelStudentItem])

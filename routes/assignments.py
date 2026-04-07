@@ -59,13 +59,19 @@ async def get_teacher_assignments(
             "updated_at": assignment.updated_at,
             "teacher_name": teacher.name if teacher else None,
             "subject_name": subject.name if subject else None,
-            "grade_name": f"{grade.grade}{grade.parallel}" if grade else None,
+            "grade_name": _canonical_grade(grade) if grade else None,
             "subgroup_name": subgroup.name if subgroup else None,
             "subject_group_name": subject_group.name if subject_group else None
         }
         result.append(assignment_data)
 
     return result
+
+
+def _canonical_grade(grade: GradeInDB) -> str:
+    from routes.grades import _normalize_grade_key
+    canonical, _, _ = _normalize_grade_key(grade.grade, grade.parallel)
+    return canonical
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
 async def create_teacher_assignment(
@@ -304,7 +310,7 @@ async def get_assignments_by_grade(
             "updated_at": assignment.updated_at,
             "teacher_name": teacher.name if teacher else None,
             "subject_name": subject.name if subject else None,
-            "grade_name": f"{grade.grade}{grade.parallel}",
+            "grade_name": _canonical_grade(grade) if grade else None,
             "subgroup_name": subgroup.name if subgroup else None,
             "subject_group_name": subject_group.name if subject_group else None
         }
