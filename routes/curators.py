@@ -77,21 +77,21 @@ async def create_curator_assignment(
     if existing_assignment:
         # Update existing assignment
         existing_assignment.curator_id = assignment.curator_id
-        db.commit()
-        db.refresh(existing_assignment)
-        return {"id": existing_assignment.id, "message": "Curator assignment updated successfully"}
+        db_assignment = existing_assignment
+        message = "Curator assignment updated successfully"
     else:
         # Create new assignment
         db_assignment = CuratorGradeInDB(
             curator_id=assignment.curator_id,
             grade_id=assignment.grade_id
         )
-        
         db.add(db_assignment)
-        db.commit()
-        db.refresh(db_assignment)
-        
-        return {"id": db_assignment.id, "message": "Curator assignment created successfully"}
+        message = "Curator assignment created successfully"
+
+    db.commit()
+    db.refresh(db_assignment)
+
+    return {"id": db_assignment.id, "message": message}
 
 @router.delete("/{assignment_id}", status_code=status.HTTP_200_OK)
 async def delete_curator_assignment(
@@ -187,7 +187,7 @@ async def get_grades_by_curator(
                 "grade_id": grade.id,
                 "grade_name": f"{grade.grade} {grade.parallel}",
                 "curator_name": grade.curator_name,  # Legacy field
-                "shanyrak": grade.shanyrak,
+                "shanyrak": curator.shanyrak if curator else None,
                 "student_count": student_count,
                 "assigned_date": assignment.created_at
             })
