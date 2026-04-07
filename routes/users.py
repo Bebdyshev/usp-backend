@@ -79,12 +79,26 @@ async def get_users_by_type(
             additional_info['assigned_grades_count'] = grade_count
         
         elif user_type == 'teacher':
-            # Count teaching assignments
-            assignment_count = db.query(TeacherAssignmentInDB).filter(
+            # Get teaching assignments with subject and grade details
+            assignments = db.query(TeacherAssignmentInDB).filter(
                 TeacherAssignmentInDB.teacher_id == user.id,
                 TeacherAssignmentInDB.is_active == 1
-            ).count()
-            additional_info['assignment_count'] = assignment_count
+            ).all()
+            additional_info['assignment_count'] = len(assignments)
+
+            subjects_set = set()
+            grades_set = set()
+            for a in assignments:
+                if a.subject_id:
+                    subj = db.query(SubjectInDB).filter(SubjectInDB.id == a.subject_id).first()
+                    if subj:
+                        subjects_set.add(subj.name)
+                if a.grade_id:
+                    grade = db.query(GradeInDB).filter(GradeInDB.id == a.grade_id).first()
+                    if grade:
+                        grades_set.add(f"{grade.grade}{grade.parallel}")
+            additional_info['subjects'] = sorted(subjects_set)
+            additional_info['grades'] = sorted(grades_set)
         
         result.append({
             "id": user.id,
