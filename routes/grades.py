@@ -97,9 +97,8 @@ def _find_or_create_grade_for_students_import(
     if existing_grade:
         return existing_grade
 
-    grade_label = grade_compact
     new_grade = GradeInDB(
-        grade=grade_label,
+        grade=grade_clean,
         parallel=parallel_clean,
         user_id=creator_id,
         student_count=0
@@ -304,6 +303,17 @@ async def bulk_upload_students(
                 "data": {"class": str(raw_class_value), "name": student_name}
             })
 
+    db.commit()
+
+    # Update student_count on each grade after bulk upload
+    grade_counts = (
+        db.query(StudentInDB.grade_id, func.count(StudentInDB.id))
+        .filter(StudentInDB.is_active == 1)
+        .group_by(StudentInDB.grade_id)
+        .all()
+    )
+    for gid, cnt in grade_counts:
+        db.query(GradeInDB).filter(GradeInDB.id == gid).update({"student_count": cnt})
     db.commit()
 
     return {
@@ -803,10 +813,20 @@ async def get_parallels(
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     
-    # Get unique grades from grades table
-    parallels = db.query(GradeInDB.grade).distinct().all()
-    parallel_list = [parallel[0] for parallel in parallels if parallel[0] is not None]
-    
+    # Get unique grade numbers (extract numeric part from grades like "10A" or "10")
+    grades = db.query(GradeInDB.grade).distinct().all()
+    seen = set()
+    parallel_list = []
+    for (g,) in grades:
+        if g is None:
+            continue
+        num = re.match(r"^(\d+)", str(g).strip())
+        key = num.group(1) if num else str(g).strip()
+        if key not in seen:
+            seen.add(key)
+            parallel_list.append(key)
+
+    parallel_list.sort(key=lambda x: int(x) if x.isdigit() else 999)
     return parallel_list
 
 def enrich_student_data(student: StudentInDB, db: Session, subject: Optional[str] = None):
