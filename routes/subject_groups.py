@@ -159,7 +159,13 @@ async def get_my_subject_groups(
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     if user_data.get("type") == "admin":
-        return []
+        groups = (
+            db.query(SubjectGroupInDB)
+            .filter(SubjectGroupInDB.is_active == 1)
+            .order_by(SubjectGroupInDB.updated_at.desc())
+            .all()
+        )
+        return [_serialize_subject_group(db, g) for g in groups]
 
     if user_data.get("type") != "teacher":
         raise HTTPException(status_code=403, detail="Only teachers can list their subject groups")
@@ -265,8 +271,8 @@ async def create_subject_group_teacher(
     user_data = verify_access_token(token)
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    if user_data.get("type") != "teacher":
-        raise HTTPException(status_code=403, detail="Only teachers can create groups here")
+    if user_data.get("type") not in ("teacher", "admin"):
+        raise HTTPException(status_code=403, detail="Only teachers and admins can create groups here")
 
     user = _get_user_from_token(db, user_data)
     if not user:
@@ -278,11 +284,13 @@ async def create_subject_group_teacher(
     if not _grade_allows_subject_groups(anchor):
         raise HTTPException(status_code=400, detail="Subject groups are only allowed for grades 11-12")
 
-    if not _teacher_may_manage_subject_parallel(db, user.id, data.subject_id, anchor):
-        raise HTTPException(
-            status_code=403,
-            detail="You are not assigned to teach this subject for this parallel",
-        )
+    # Admins skip the assignment check
+    if user_data.get("type") != "admin":
+        if not _teacher_may_manage_subject_parallel(db, user.id, data.subject_id, anchor):
+            raise HTTPException(
+                status_code=403,
+                detail="You are not assigned to teach this subject for this parallel",
+            )
 
     subject = db.query(SubjectInDB).filter(SubjectInDB.id == data.subject_id).first()
     if not subject:
