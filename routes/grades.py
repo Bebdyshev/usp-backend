@@ -1108,10 +1108,6 @@ async def update_grade(
     # Update only the fields that are provided
     update_dict = update_data.dict(exclude_unset=True)
     
-    # Специальная обработка для studentCount -> student_count
-    if "studentCount" in update_dict:
-        grade.student_count = update_dict.pop("studentCount")
-    
     for key, value in update_dict.items():
         # Проверяем, что мы обновляем только существующие атрибуты
         if hasattr(grade, key):
@@ -1186,7 +1182,7 @@ async def update_student_count(
     return {
         "message": "Student count updated successfully",
         "grade": grade.grade,
-        "studentCount": grade.studentcount
+        "student_count": grade.student_count
     }
 
 @router.put("/students/{student_id}", status_code=status.HTTP_200_OK)
