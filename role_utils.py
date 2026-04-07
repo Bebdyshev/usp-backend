@@ -4,7 +4,7 @@ Helper functions to determine which grades/subjects a user can access based on t
 """
 
 from sqlalchemy.orm import Session
-from schemas.models import UserInDB, GradeInDB, CuratorGradeInDB, TeacherAssignmentInDB
+from schemas.models import UserInDB, GradeInDB, CuratorGradeInDB, TeacherAssignmentInDB, SubjectGroupInDB
 from typing import List, Optional, Set
 
 
@@ -61,6 +61,13 @@ def get_user_allowed_grade_ids(user_data: dict, db: Session) -> Optional[Set[int
         for assignment in teacher_assignments:
             if assignment.grade_id:
                 allowed_grades.add(assignment.grade_id)
+            elif assignment.subject_group_id:
+                # Resolve grade_id from the linked subject group
+                subject_group = db.query(SubjectGroupInDB).filter(
+                    SubjectGroupInDB.id == assignment.subject_group_id
+                ).first()
+                if subject_group and subject_group.grade_id:
+                    allowed_grades.add(subject_group.grade_id)
     
     return allowed_grades
 
