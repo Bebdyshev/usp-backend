@@ -4,7 +4,14 @@ Helper functions to determine which grades/subjects a user can access based on t
 """
 
 from sqlalchemy.orm import Session
-from schemas.models import UserInDB, GradeInDB, CuratorGradeInDB, TeacherAssignmentInDB, SubjectGroupInDB
+from schemas.models import (
+    UserInDB,
+    GradeInDB,
+    CuratorGradeInDB,
+    TeacherAssignmentInDB,
+    SubjectGroupInDB,
+    SubjectInDB,
+)
 from typing import List, Optional, Set
 
 
@@ -131,3 +138,20 @@ def filter_grades_by_access(user_data: dict, grades: List[GradeInDB], db: Sessio
         return grades
     
     return [g for g in grades if g.id in allowed_grades]
+
+
+def compute_show_subject_groups_nav_for_user(db: Session, user: UserInDB) -> bool:
+    """True, если у учителя есть активное назначение по предмету с флагом allows_subject_groups."""
+    if user.type != "teacher":
+        return False
+    row = (
+        db.query(SubjectInDB.id)
+        .join(TeacherAssignmentInDB, TeacherAssignmentInDB.subject_id == SubjectInDB.id)
+        .filter(
+            TeacherAssignmentInDB.teacher_id == user.id,
+            TeacherAssignmentInDB.is_active == 1,
+            SubjectInDB.allows_subject_groups.is_(True),
+        )
+        .first()
+    )
+    return row is not None

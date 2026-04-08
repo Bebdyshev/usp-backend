@@ -235,6 +235,11 @@ async def create_subject_group(
     subject = db.query(SubjectInDB).filter(SubjectInDB.id == data.subject_id).first()
     if not subject:
         raise HTTPException(status_code=404, detail="Subject not found")
+    if not subject.allows_subject_groups:
+        raise HTTPException(
+            status_code=400,
+            detail="This subject is not enabled for subject groups (11–12). Enable it in the subject catalog first.",
+        )
 
     existing = (
         db.query(SubjectGroupInDB)
@@ -295,6 +300,11 @@ async def create_subject_group_teacher(
     subject = db.query(SubjectInDB).filter(SubjectInDB.id == data.subject_id).first()
     if not subject:
         raise HTTPException(status_code=404, detail="Subject not found")
+    if not subject.allows_subject_groups:
+        raise HTTPException(
+            status_code=400,
+            detail="This subject is not enabled for subject groups (11–12). Ask an administrator to enable it on the subject.",
+        )
 
     name_clean = data.name.strip()
     existing = (

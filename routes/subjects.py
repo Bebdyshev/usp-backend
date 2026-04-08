@@ -51,6 +51,7 @@ async def create_subject(
         name=subject.name,
         description=subject.description,
         applicable_parallels=parallels,
+        allows_subject_groups=subject.allows_subject_groups,
         is_active=1
     )
     

@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from auth_utils import hash_password, verify_password, create_access_token, verify_access_token
 from config import get_db
 from schemas.models import *
+from role_utils import compute_show_subject_groups_nav_for_user
 from datetime import timedelta
 import traceback
 import logging
@@ -83,7 +84,20 @@ def get_me(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     user = db.query(UserInDB).filter(UserInDB.email == user_email).first()
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    return user
+    return {
+        "id": user.id,
+        "name": user.name,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "email": user.email,
+        "type": user.type,
+        "company_name": user.company_name,
+        "shanyrak": user.shanyrak,
+        "is_active": user.is_active,
+        "created_at": user.created_at,
+        "updated_at": user.updated_at,
+        "show_subject_groups_nav": compute_show_subject_groups_nav_for_user(db, user),
+    }
 
 @router.delete("/delete_all/")
 def delete_all(db: Session = Depends(get_db)):

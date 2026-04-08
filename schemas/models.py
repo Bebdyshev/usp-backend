@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Index, Text
+from sqlalchemy import Boolean, Column, Integer, String, Float, DateTime, ForeignKey, Index, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
@@ -125,6 +125,7 @@ class SubjectInDB(Base):
     name = Column(String(100), nullable=False, unique=True, index=True)
     description = Column(Text, nullable=True)
     applicable_parallels = Column(JSONB, nullable=False, default=[])
+    allows_subject_groups = Column(Boolean, nullable=False, default=False, index=True)
     is_active = Column(Integer, default=1, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -325,18 +326,21 @@ class CreateSubject(BaseModel):
     name: str
     description: Optional[str] = None
     applicable_parallels: List[int] = []
+    allows_subject_groups: bool = False
 
 class UpdateSubject(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     is_active: Optional[int] = None
     applicable_parallels: Optional[List[int]] = None
+    allows_subject_groups: Optional[bool] = None
 
 class SubjectResponse(BaseModel):
     id: int
     name: str
     description: Optional[str] = None
     applicable_parallels: List[int]
+    allows_subject_groups: bool
     is_active: int
     created_at: datetime
     updated_at: datetime
@@ -371,6 +375,17 @@ class SystemSettingsResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class AdvanceAcademicYearResponse(BaseModel):
+    """Перевод учебного года: перевод классов и смена года в настройках."""
+    dry_run: bool
+    previous_academic_year: str
+    new_academic_year: str
+    promoted: int
+    graduated_unchanged: int
+    issues: List[Dict[str, Any]]
+
 
 class AvailableClassesResponse(BaseModel):
     classes: List[str]

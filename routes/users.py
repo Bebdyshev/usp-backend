@@ -366,6 +366,7 @@ def _get_or_create_subject(db: Session, name: str) -> Optional[SubjectInDB]:
     new_subject = SubjectInDB(
         name=name.strip(),
         applicable_parallels=[],
+        allows_subject_groups=False,
         is_active=1
     )
     db.add(new_subject)

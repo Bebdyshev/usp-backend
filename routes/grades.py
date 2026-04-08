@@ -7,15 +7,50 @@ from schemas.models import *
 from sqlalchemy import or_, and_
 from auth_utils import verify_access_token
 from routes.auth import oauth2_scheme
-from role_utils import get_user_allowed_grade_ids, check_grade_access
+from role_utils import (
+    get_user_allowed_grade_ids,
+    check_grade_access,
+    get_user_from_token,
+    compute_show_subject_groups_nav_for_user,
+)
+from services.school_year import get_current_academic_year
 import pandas as pd
 from io import BytesIO, StringIO
 from services.analyze import analyze_excel
-from services.excel_parser import parse_excel_grades, generate_excel_template
-from typing import Optional, List
+from services.excel_parser import (
+    parse_excel_grades,
+    generate_excel_template,
+    load_prediction_weights_from_db,
+    recalculate_predicted_and_danger_from_actual,
+)
+from typing import Optional, List, Set
 import re
 
 router = APIRouter()
+
+
+def _sync_score_prediction_with_actual(score: ScoresInDB, db: Session) -> None:
+    """Прогноз и риск — как при импорте Excel (формула по четвертям, веса из настроек)."""
+    act = score.actual_scores
+    if isinstance(act, dict):
+        row: List[float] = []
+        for i in range(1, 5):
+            v = act.get(f"q{i}", 0)
+            row.append(float(v) if v is not None else 0.0)
+        act = row
+    elif not isinstance(act, list):
+        act = []
+    weights = load_prediction_weights_from_db(db)
+    pred, dlevel, dpct = recalculate_predicted_and_danger_from_actual(
+        act,
+        score.previous_class_score,
+        None,
+        weights,
+    )
+    score.predicted_scores = pred
+    score.danger_level = dlevel
+    score.delta_percentage = dpct
+
 
 def _extract_grade_parallel_from_class_text(class_text: str) -> tuple[Optional[str], Optional[str]]:
     if not class_text:
@@ -375,6 +410,7 @@ async def send_excel_as_csv_to_openai(
             db.commit()
             db.refresh(db_grade)
 
+        current_ay = get_current_academic_year(db)
         # Обработка данных студентов
         for analysis_item in json_response['students']:
             student_name = analysis_item["student_name"]
@@ -418,16 +454,18 @@ async def send_excel_as_csv_to_openai(
                 db.commit()
                 db.refresh(db_student)
 
-            # Обновляем или создаем запись с оценками ПО ПРЕДМЕТУ
+            # Обновляем или создаем запись с оценками ПО ПРЕДМЕТУ (текущий учебный год)
             db_score = db.query(ScoresInDB).filter(
                 ScoresInDB.student_id == db_student.id,
-                ScoresInDB.subject_name == subject
+                ScoresInDB.subject_name == subject,
+                ScoresInDB.academic_year == current_ay,
             ).first()
             if db_score:
                 db_score.actual_scores = actual_score
                 db_score.predicted_scores = predicted_scores
                 db_score.danger_level = danger_level
                 db_score.delta_percentage = round(percentage_difference, 1)
+                db_score.academic_year = current_ay
             else:
                 new_score = ScoresInDB(
                     subject_name=subject,
@@ -437,6 +475,8 @@ async def send_excel_as_csv_to_openai(
                     delta_percentage=round(percentage_difference, 1),
                     student_id=db_student.id,
                     grade_id=db_grade.id,
+                    semester=1,
+                    academic_year=current_ay,
                 )
                 print(new_score)
 
@@ -628,19 +668,42 @@ def get_students_by_danger_level(
     except Exception as e:
         raise HTTPException(status_code=500, detail="An error occurred while fetching class data")
 
+def _parallel_int_from_grade_row_local(grade: GradeInDB) -> Optional[int]:
+    """Параллель из поля grade (как в subject_groups.parallel_int_from_grade_row)."""
+    if not grade or grade.grade is None:
+        return None
+    m = re.match(r"^(\d+)", str(grade.grade).strip())
+    return int(m.group(1)) if m else None
+
+
 @router.get("/all", response_model=List[dict])
 async def get_all_grades(
     token: str = Depends(oauth2_scheme),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    purpose: Optional[str] = Query(
+        None,
+        description="subject_group_anchors — для учителей с предметными группами: добавить все классы 11–12 в список якорей",
+    ),
 ):
     """Get information about all grades/classes (filtered by user role)"""
     user_data = verify_access_token(token)
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
-    # Get allowed grade IDs for role-based filtering
+
     allowed_grade_ids = get_user_allowed_grade_ids(user_data, db)
-    
+
+    # Учитель может не иметь 11–12 в назначениях, но якорь группы должен быть параллель 11 или 12
+    if purpose == "subject_group_anchors" and user_data.get("type") == "teacher":
+        user = get_user_from_token(user_data, db)
+        if user and compute_show_subject_groups_nav_for_user(db, user):
+            anchor_ids: Set[int] = set()
+            for g in db.query(GradeInDB).all():
+                p = _parallel_int_from_grade_row_local(g)
+                if p in (11, 12):
+                    anchor_ids.add(g.id)
+            if allowed_grade_ids is not None:
+                allowed_grade_ids = allowed_grade_ids | anchor_ids
+
     # Build query with optional filtering
     grades_query = db.query(GradeInDB)
     if allowed_grade_ids is not None:  # Not admin
@@ -1533,40 +1596,10 @@ async def update_score(
     for key, value in update_dict.items():
         if hasattr(score, key):
             setattr(score, key, value)
-    
-    # Recalculate danger level if actual_scores changed
-    if 'actual_scores' in update_dict and score.actual_scores:
-        actual = score.actual_scores
-        predicted = score.predicted_scores or []
-        
-        # Calculate average of actual scores (now it's a list)
-        if isinstance(actual, list):
-            actual_values = [v for v in actual if isinstance(v, (int, float)) and v > 0]
-        else:
-            actual_values = [v for v in actual.values() if isinstance(v, (int, float)) and v > 0]
-        
-        if isinstance(predicted, list):
-            predicted_values = [v for v in predicted if isinstance(v, (int, float)) and v > 0]
-        else:
-            predicted_values = [v for v in predicted.values() if isinstance(v, (int, float)) and v > 0]
-        
-        if actual_values:
-            avg_actual = sum(actual_values) / len(actual_values)
-            avg_predicted = sum(predicted_values) / len(predicted_values) if predicted_values else avg_actual
-            
-            delta = avg_actual - avg_predicted
-            score.delta_percentage = round(delta, 2)
-            
-            # Calculate danger level based on delta
-            if delta >= -5:
-                score.danger_level = 0  # Low risk
-            elif delta >= -15:
-                score.danger_level = 1  # Moderate risk
-            elif delta >= -25:
-                score.danger_level = 2  # High risk
-            else:
-                score.danger_level = 3  # Critical
-    
+
+    if "actual_scores" in update_dict and score.actual_scores is not None:
+        _sync_score_prediction_with_actual(score, db)
+
     db.commit()
     db.refresh(score)
     
@@ -1639,13 +1672,14 @@ async def create_score(
     else:
         raise HTTPException(status_code=403, detail="Only admins and teachers can create scores")
     
-    # Check if score already exists
+    current_year = get_current_academic_year(db)
+    # Одна запись на ученика / предмет / текущий учебный год (история прошлых лет хранится отдельными строками)
     existing_score = db.query(ScoresInDB).filter(
         ScoresInDB.student_id == student_id,
         ScoresInDB.subject_id == subject_id,
-        ScoresInDB.grade_id == student.grade_id
+        ScoresInDB.academic_year == current_year,
     ).first()
-    
+
     if existing_score:
         # If score exists, update it instead of creating new
         scores_list = [0.0, 0.0, 0.0, 0.0]
@@ -1657,6 +1691,9 @@ async def create_score(
         
         existing_score.actual_scores = scores_list
         existing_score.teacher_name = teacher_name
+        existing_score.grade_id = student.grade_id
+        existing_score.academic_year = current_year
+        _sync_score_prediction_with_actual(existing_score, db)
         db.commit()
         db.refresh(existing_score)
         
@@ -1683,7 +1720,15 @@ async def create_score(
             key = f'q{i}'
             val = actual_scores.get(key, 0)
             scores_list[i-1] = float(val) if val is not None else 0.0
-    
+
+    weights = load_prediction_weights_from_db(db)
+    pred_list, dlevel, dpct = recalculate_predicted_and_danger_from_actual(
+        scores_list,
+        None,
+        None,
+        weights,
+    )
+
     # Create new score
     new_score = ScoresInDB(
         teacher_name=teacher_name,
@@ -1692,17 +1737,17 @@ async def create_score(
         student_id=student_id,
         grade_id=student.grade_id,
         actual_scores=scores_list,
-        predicted_scores=[0.0, 0.0, 0.0, 0.0],
-        danger_level=0,
-        delta_percentage=0.0,
+        predicted_scores=pred_list,
+        danger_level=dlevel,
+        delta_percentage=dpct,
         semester=1,
-        academic_year="2024-2025"
+        academic_year=current_year,
     )
-    
+
     db.add(new_score)
     db.commit()
     db.refresh(new_score)
-    
+
     return {
         "message": "Score created successfully",
         "score": {
@@ -1756,6 +1801,7 @@ async def get_teacher_assignments(
             "id": assignment.id,
             "subject_id": assignment.subject_id,
             "subject_name": subject.name if subject else None,
+            "subject_allows_subject_groups": bool(subject.allows_subject_groups) if subject else False,
             "grade_id": assignment.grade_id,
             "grade_name": f"{grade.grade}{grade.parallel}" if grade else "Все классы",
             "subgroup_id": assignment.subgroup_id,
@@ -1853,16 +1899,19 @@ async def get_teacher_students(
             student_query = student_query.filter(StudentInDB.subgroup_id == subgroup_id)
 
     students = student_query.all()
-    
+
+    current_year = get_current_academic_year(db)
+
     # Get subject info
     subject = db.query(SubjectInDB).filter(SubjectInDB.id == subject_id).first()
     
     result = []
     for student in students:
-        # Get existing score for this student and subject
+        # Оценка за текущий учебный год (история хранится в других строках)
         score = db.query(ScoresInDB).filter(
             ScoresInDB.student_id == student.id,
-            ScoresInDB.subject_id == subject_id
+            ScoresInDB.subject_id == subject_id,
+            ScoresInDB.academic_year == current_year,
         ).first()
         
         grade = db.query(GradeInDB).filter(GradeInDB.id == student.grade_id).first()
@@ -2038,7 +2087,8 @@ async def upload_excel_grades(
         warnings = parsed_data.get('warnings', [])
         errors = parsed_data.get('errors', [])
         danger_distribution = {0: 0, 1: 0, 2: 0, 3: 0}
-        
+        current_year = get_current_academic_year(db)
+
         for student_data in parsed_data['students']:
             try:
                 student_name = student_data["student_name"]
@@ -2099,13 +2149,14 @@ async def upload_excel_grades(
                     if subgroup_id and db_student.subgroup_id != subgroup_id:
                         db_student.subgroup_id = subgroup_id
                 
-                # Find existing score record for this student/subject/semester
+                # Одна запись на ученика / предмет / семестр / текущий учебный год
                 db_score = db.query(ScoresInDB).filter(
                     ScoresInDB.student_id == db_student.id,
                     ScoresInDB.subject_id == subject_id,
-                    ScoresInDB.semester == semester
+                    ScoresInDB.semester == semester,
+                    ScoresInDB.academic_year == current_year,
                 ).first()
-                
+
                 if db_score:
                     # Update existing record
                     db_score.teacher_name = teacher_name
@@ -2117,6 +2168,7 @@ async def upload_excel_grades(
                     db_score.delta_percentage = round(percentage_difference, 1)
                     db_score.grade_id = grade_id
                     db_score.subgroup_id = subgroup_id
+                    db_score.academic_year = current_year
                     if subject_group_id is not None:
                         db_score.subject_group_id = subject_group_id
                 else:
@@ -2131,7 +2183,7 @@ async def upload_excel_grades(
                         danger_level=danger_level,
                         delta_percentage=round(percentage_difference, 1),
                         semester=semester,
-                        academic_year="2024-2025",  # TODO: Make this configurable
+                        academic_year=current_year,
                         student_id=db_student.id,
                         grade_id=grade_id,
                         subgroup_id=subgroup_id,

@@ -3,7 +3,7 @@ from fastapi import HTTPException
 from io import BytesIO
 import json
 import re
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Union
 import unicodedata
 
 def normalize_name(name: str) -> str:
@@ -115,6 +115,96 @@ def calculate_predicted_scores_by_quarter(
         predicted_scores[i] = round(prediction, 1)
 
     return predicted_scores
+
+
+def load_prediction_weights_from_db(db: Any) -> Dict[str, float]:
+    """Веса из настроек (как при импорте Excel)."""
+    from schemas.models import PredictionSettings
+
+    prediction_settings = db.query(PredictionSettings).filter(
+        PredictionSettings.is_active == 1
+    ).first()
+    weights: Dict[str, float] = {
+        "previous_class": 0.3,
+        "teacher": 0.2,
+        "quarters": 0.5,
+    }
+    if prediction_settings and prediction_settings.weights:
+        weights = prediction_settings.weights
+    return weights
+
+
+def recalculate_predicted_and_danger_from_actual(
+    actual_scores_list: Union[List[Any], None],
+    previous_class_score: Optional[float],
+    teacher_percent: Optional[float],
+    weights: Optional[Dict[str, float]] = None,
+) -> Tuple[List[float], int, float]:
+    """
+    Та же логика, что при импорте Excel: прогноз по четвертям + уровень риска по заполненным четвертям.
+    Для прогноза пустые ячейки — None (0 или отсутствие значения не считаются введённой оценкой).
+    """
+    raw_in: List[Any] = list(actual_scores_list or [])[:4]
+    while len(raw_in) < 4:
+        raw_in.append(0.0)
+
+    quarters_opt: List[Optional[float]] = []
+    for x in raw_in:
+        if x is None:
+            quarters_opt.append(None)
+        else:
+            try:
+                fv = float(x)
+            except (TypeError, ValueError):
+                quarters_opt.append(None)
+                continue
+            quarters_opt.append(fv if fv > 0 else None)
+
+    w = weights or {
+        "previous_class": 0.3,
+        "teacher": 0.2,
+        "quarters": 0.5,
+    }
+    predicted = calculate_predicted_scores_by_quarter(
+        previous_class_score,
+        quarters_opt,
+        teacher_percent,
+        w,
+    )
+
+    raw = []
+    for x in raw_in:
+        if x is None:
+            raw.append(0.0)
+        else:
+            try:
+                raw.append(float(x))
+            except (TypeError, ValueError):
+                raw.append(0.0)
+
+    actual_completed = [s for s in raw if s > 0]
+    num_completed = len(actual_completed)
+    danger_level = 0
+    percentage_difference = 0.0
+
+    if num_completed > 0 and len(predicted) >= num_completed:
+        predicted_for_completed = predicted[:num_completed]
+        avg_actual = sum(actual_completed) / num_completed
+        avg_predicted = sum(predicted_for_completed) / num_completed
+        delta = avg_actual - avg_predicted
+        if delta < -15:
+            danger_level = 3
+        elif delta < -10:
+            danger_level = 2
+        elif delta < -5:
+            danger_level = 1
+        else:
+            danger_level = 0
+        if avg_predicted > 0:
+            percentage_difference = (delta / avg_predicted) * 100
+
+    return predicted, danger_level, round(percentage_difference, 1)
+
 
 def parse_excel_grades(
     file_content: bytes,

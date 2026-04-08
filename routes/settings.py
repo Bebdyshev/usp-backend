@@ -1,10 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from config import get_db
 from schemas.models import *
 from auth_utils import verify_access_token
 from routes.auth import oauth2_scheme
 from typing import List
+
+from services.school_year import (
+    get_current_academic_year,
+    next_academic_year_label,
+    promote_all_students_to_next_grade,
+)
 
 router = APIRouter()
 
@@ -90,6 +96,69 @@ async def update_system_settings(
     db.refresh(settings)
     
     return settings
+
+
+@router.post("/advance-academic-year", response_model=AdvanceAcademicYearResponse)
+async def advance_academic_year(
+    dry_run: bool = Query(False, description="Только проверка, без изменений в БД"),
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
+):
+    """
+    Новый учебный год: перевести всех учеников на следующий параллельный класс (та же литера),
+    затем увеличить учебный год в настройках (2024-2025 → 2025-2026).
+    Оценки прошлых лет в таблице scores не удаляются — привязаны к полю academic_year.
+    """
+    user_data = verify_access_token(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    if user_data.get("type") != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can advance the academic year")
+
+    settings = db.query(SystemSettingsInDB).filter(SystemSettingsInDB.is_active == 1).first()
+    if not settings:
+        raise HTTPException(status_code=400, detail="Сначала создайте системные настройки")
+
+    current = get_current_academic_year(db)
+    try:
+        next_label = next_academic_year_label(current)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    preview = promote_all_students_to_next_grade(db, dry_run=True)
+    if dry_run:
+        return AdvanceAcademicYearResponse(
+            dry_run=True,
+            previous_academic_year=current,
+            new_academic_year=next_label,
+            promoted=preview["promoted"],
+            graduated_unchanged=preview["graduated_unchanged"],
+            issues=preview["issues"],
+        )
+
+    if preview["issues"]:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Устраните проблемы со справочником классов или учениками, затем повторите",
+                "issues": preview["issues"],
+            },
+        )
+
+    promote_all_students_to_next_grade(db, dry_run=False)
+    settings.academic_year = next_label
+    db.commit()
+    db.refresh(settings)
+
+    return AdvanceAcademicYearResponse(
+        dry_run=False,
+        previous_academic_year=current,
+        new_academic_year=next_label,
+        promoted=preview["promoted"],
+        graduated_unchanged=preview["graduated_unchanged"],
+        issues=[],
+    )
+
 
 @router.get("/available-classes", response_model=AvailableClassesResponse)
 async def get_available_classes(
