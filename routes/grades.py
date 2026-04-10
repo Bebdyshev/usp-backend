@@ -578,6 +578,7 @@ def get_class_data(
                     "delta_percentage": delta_percentage,
                     "class_liter": canonical,
                     "grade_id": grade.id,
+                    "source_grade_id": grade.id,
                 })
 
             grade_canonical, _, _ = _normalize_grade_key(grade.grade, grade.parallel)
@@ -597,8 +598,6 @@ def get_class_data(
             groups_query = groups_query.join(
                 SubjectInDB, SubjectInDB.id == SubjectGroupInDB.subject_id
             ).filter(SubjectInDB.name == subject)
-        if allowed_grade_ids is not None:
-            groups_query = groups_query.filter(SubjectGroupInDB.grade_id.in_(allowed_grade_ids))
         subject_groups = groups_query.all()
 
         for sg in subject_groups:
@@ -670,6 +669,7 @@ def get_class_data(
                     "class_liter": sg.name,
                     # virtual class id to keep group isolated in analytics filters
                     "grade_id": -(sg.id),
+                    "source_grade_id": student.grade_id,
                 })
 
             class_data.append({
