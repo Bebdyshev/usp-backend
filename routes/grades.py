@@ -585,6 +585,101 @@ def get_class_data(
                 "curator_name": grade.curator_name,
                 "subject_name": subject,
                 "grade_liter": grade_canonical,
+                "grade_id": grade.id,
+                "is_subject_group": False,
+                "class": student_info_list
+            })
+
+        # Subject groups as "virtual classes" for analytics:
+        # each group is a separate class-like bucket across real classes.
+        groups_query = db.query(SubjectGroupInDB).filter(SubjectGroupInDB.is_active == 1)
+        if subject:
+            groups_query = groups_query.join(
+                SubjectInDB, SubjectInDB.id == SubjectGroupInDB.subject_id
+            ).filter(SubjectInDB.name == subject)
+        if allowed_grade_ids is not None:
+            groups_query = groups_query.filter(SubjectGroupInDB.grade_id.in_(allowed_grade_ids))
+        subject_groups = groups_query.all()
+
+        for sg in subject_groups:
+            member_rows = db.query(StudentSubjectGroupMembershipInDB).filter(
+                StudentSubjectGroupMembershipInDB.subject_group_id == sg.id,
+                StudentSubjectGroupMembershipInDB.is_active == 1
+            ).all()
+            student_info_list = []
+
+            for member in member_rows:
+                student = db.query(StudentInDB).filter(StudentInDB.id == member.student_id).first()
+                if not student:
+                    continue
+
+                scores_query = db.query(ScoresInDB).filter(
+                    ScoresInDB.student_id == student.id,
+                    ScoresInDB.subject_group_id == sg.id
+                )
+                if subject:
+                    scores_query = scores_query.filter(ScoresInDB.subject_name == subject)
+                student_scores = scores_query.all()
+
+                all_valid_scores = []
+                overall_danger_level = 0
+                danger_count = 0
+
+                actual_scores = []
+                predicted_scores = []
+                previous_class_score = None
+                danger_level = None
+                delta_percentage = None
+
+                for score in student_scores:
+                    if score.actual_scores and isinstance(score.actual_scores, list):
+                        valid_scores = [s for s in score.actual_scores if s is not None and s > 0]
+                        all_valid_scores.extend(valid_scores)
+
+                    if score.danger_level is not None:
+                        overall_danger_level += score.danger_level
+                        danger_count += 1
+
+                    if score.actual_scores:
+                        actual_scores = score.actual_scores if isinstance(score.actual_scores, list) else []
+                    if score.predicted_scores:
+                        predicted_scores = score.predicted_scores if isinstance(score.predicted_scores, list) else []
+                    if score.previous_class_score is not None:
+                        previous_class_score = score.previous_class_score
+                    danger_level = score.danger_level
+                    delta_percentage = score.delta_percentage
+
+                avg_percentage = None
+                if all_valid_scores:
+                    avg_percentage = round(sum(all_valid_scores) / len(all_valid_scores), 1)
+
+                if danger_count > 0:
+                    danger_level = round(overall_danger_level / danger_count)
+
+                student_info_list.append({
+                    "id": student.id,
+                    "student_name": student.name,
+                    "email": student.email,
+                    "previous_class_score": previous_class_score,
+                    "actual_score": actual_scores,
+                    "actual_scores": actual_scores,
+                    "predicted_scores": predicted_scores,
+                    "avg_percentage": avg_percentage,
+                    "danger_level": danger_level,
+                    "delta_percentage": delta_percentage,
+                    "class_liter": sg.name,
+                    # virtual class id to keep group isolated in analytics filters
+                    "grade_id": -(sg.id),
+                })
+
+            class_data.append({
+                "curator_name": None,
+                "subject_name": subject or (sg.subject.name if getattr(sg, "subject", None) else None),
+                "grade_liter": f"Группа: {sg.name}",
+                "grade_id": -(sg.id),
+                "is_subject_group": True,
+                "subject_group_id": sg.id,
+                "parallel_num": str(_parallel_int_from_grade_row_local(db.query(GradeInDB).filter(GradeInDB.id == sg.grade_id).first()) or ""),
                 "class": student_info_list
             })
         
@@ -1622,6 +1717,7 @@ async def update_score(
 async def create_score(
     student_id: int = Body(...),
     subject_id: int = Body(...),
+    subject_group_id: Optional[int] = Body(default=None),
     actual_scores: dict = Body(default=None),
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
@@ -1641,6 +1737,24 @@ async def create_score(
     if not subject:
         raise HTTPException(status_code=404, detail="Subject not found")
     
+    subject_group = None
+    if subject_group_id:
+        subject_group = db.query(SubjectGroupInDB).filter(
+            SubjectGroupInDB.id == subject_group_id,
+            SubjectGroupInDB.is_active == 1
+        ).first()
+        if not subject_group:
+            raise HTTPException(status_code=404, detail="Subject group not found")
+        if subject_group.subject_id != subject_id:
+            raise HTTPException(status_code=400, detail="Subject does not match selected group")
+        is_member = db.query(StudentSubjectGroupMembershipInDB).filter(
+            StudentSubjectGroupMembershipInDB.student_id == student_id,
+            StudentSubjectGroupMembershipInDB.subject_group_id == subject_group_id,
+            StudentSubjectGroupMembershipInDB.is_active == 1,
+        ).first()
+        if not is_member:
+            raise HTTPException(status_code=400, detail="Student is not a member of selected subject group")
+
     user_type = user_data.get("type")
     user_email = user_data.get("sub")
     
@@ -1655,15 +1769,25 @@ async def create_score(
         teacher_name = user.name or user.email
     elif user_type == "teacher":
         # Teachers can only create scores for their assigned subjects/groups
-        assignment = db.query(TeacherAssignmentInDB).filter(
+        assignment_query = db.query(TeacherAssignmentInDB).filter(
             TeacherAssignmentInDB.teacher_id == user.id,
             TeacherAssignmentInDB.subject_id == subject_id,
             TeacherAssignmentInDB.is_active == 1,
+        )
+        if subject_group_id:
+            assignment_query = assignment_query.filter(
+                or_(
+                    TeacherAssignmentInDB.subject_group_id == subject_group_id,
+                    TeacherAssignmentInDB.subject_group_id == None
+                )
+            )
+        assignment_query = assignment_query.filter(
             or_(
                 TeacherAssignmentInDB.grade_id == student.grade_id,
                 TeacherAssignmentInDB.grade_id == None
             )
-        ).first()
+        )
+        assignment = assignment_query.first()
         
         if not assignment:
             raise HTTPException(status_code=403, detail="You don't have permission to create scores for this student/subject")
@@ -1678,6 +1802,7 @@ async def create_score(
         ScoresInDB.student_id == student_id,
         ScoresInDB.subject_id == subject_id,
         ScoresInDB.academic_year == current_year,
+        ScoresInDB.subject_group_id == subject_group_id if subject_group_id is not None else ScoresInDB.subject_group_id.is_(None),
     ).first()
 
     if existing_score:
@@ -1692,6 +1817,7 @@ async def create_score(
         existing_score.actual_scores = scores_list
         existing_score.teacher_name = teacher_name
         existing_score.grade_id = student.grade_id
+        existing_score.subject_group_id = subject_group_id
         existing_score.academic_year = current_year
         _sync_score_prediction_with_actual(existing_score, db)
         db.commit()
@@ -1736,6 +1862,7 @@ async def create_score(
         subject_id=subject_id,
         student_id=student_id,
         grade_id=student.grade_id,
+        subject_group_id=subject_group_id,
         actual_scores=scores_list,
         predicted_scores=pred_list,
         danger_level=dlevel,
@@ -1908,11 +2035,16 @@ async def get_teacher_students(
     result = []
     for student in students:
         # Оценка за текущий учебный год (история хранится в других строках)
-        score = db.query(ScoresInDB).filter(
+        score_query = db.query(ScoresInDB).filter(
             ScoresInDB.student_id == student.id,
             ScoresInDB.subject_id == subject_id,
             ScoresInDB.academic_year == current_year,
-        ).first()
+        )
+        if subject_group_id:
+            score_query = score_query.filter(ScoresInDB.subject_group_id == subject_group_id)
+        else:
+            score_query = score_query.filter(ScoresInDB.subject_group_id.is_(None))
+        score = score_query.first()
         
         grade = db.query(GradeInDB).filter(GradeInDB.id == student.grade_id).first()
         
@@ -1933,7 +2065,7 @@ async def get_teacher_students(
 
 @router.post("/upload", response_model=ExcelUploadResponse)
 async def upload_excel_grades(
-    grade_id: int = Form(...),
+    grade_id: Optional[int] = Form(None),
     subject_id: int = Form(...),
     teacher_name: str = Form(...),
     semester: int = Form(1),
@@ -1945,8 +2077,9 @@ async def upload_excel_grades(
 ):
     """
     Upload Excel file with student grades
-    Requires: grade_id, subject_id, teacher_name, file
-    Optional: semester (default 1), subgroup_id, subject_group_id (for 11-12)
+    Requires: subject_id, teacher_name, file
+    Optional: grade_id (if omitted, can be derived from subject_group_id),
+    semester (default 1), subgroup_id, subject_group_id
     """
     try:
         # Verify access (admin or teacher)
@@ -1965,6 +2098,23 @@ async def upload_excel_grades(
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
+        # If subject_group is chosen, it becomes the source of truth for grade/subject scope
+        effective_grade_id = grade_id
+        subject_group = None
+        if subject_group_id:
+            from schemas.models import SubjectGroupInDB
+            subject_group = db.query(SubjectGroupInDB).filter(
+                SubjectGroupInDB.id == subject_group_id,
+                SubjectGroupInDB.subject_id == subject_id,
+                SubjectGroupInDB.is_active == 1
+            ).first()
+            if not subject_group:
+                raise HTTPException(status_code=404, detail="Subject group not found or doesn't belong to the specified subject")
+            effective_grade_id = subject_group.grade_id
+
+        if effective_grade_id is None:
+            raise HTTPException(status_code=400, detail="Specify grade_id or choose subject_group_id")
+
         # If teacher, check if they have assignment for this subject/grade/subgroup/subject_group
         if user_type == "teacher":
             assignment_filters = [
@@ -1972,7 +2122,7 @@ async def upload_excel_grades(
                 TeacherAssignmentInDB.subject_id == subject_id,
                 TeacherAssignmentInDB.is_active == 1,
                 or_(
-                    TeacherAssignmentInDB.grade_id == grade_id,
+                    TeacherAssignmentInDB.grade_id == effective_grade_id,
                     TeacherAssignmentInDB.grade_id == None
                 )
             ]
@@ -2003,7 +2153,7 @@ async def upload_excel_grades(
             raise HTTPException(status_code=400, detail="Only Excel files (.xlsx, .xls) are allowed")
         
         # Validate grade exists
-        grade = db.query(GradeInDB).filter(GradeInDB.id == grade_id).first()
+        grade = db.query(GradeInDB).filter(GradeInDB.id == effective_grade_id).first()
         if not grade:
             raise HTTPException(status_code=404, detail="Grade not found")
         
@@ -2027,23 +2177,17 @@ async def upload_excel_grades(
         if subgroup_id:
             subgroup = db.query(SubgroupInDB).filter(
                 SubgroupInDB.id == subgroup_id,
-                SubgroupInDB.grade_id == grade_id
+                SubgroupInDB.grade_id == effective_grade_id
             ).first()
             if not subgroup:
                 raise HTTPException(status_code=404, detail="Subgroup not found or doesn't belong to the specified grade")
 
-        # Validate subject_group if provided (grades 11-12 only)
-        subject_group = None
+        # Validate subject_group consistency with resolved grade (if provided)
         if subject_group_id:
-            from schemas.models import SubjectGroupInDB
-            subject_group = db.query(SubjectGroupInDB).filter(
-                SubjectGroupInDB.id == subject_group_id,
-                SubjectGroupInDB.grade_id == grade_id,
-                SubjectGroupInDB.subject_id == subject_id,
-                SubjectGroupInDB.is_active == 1
-            ).first()
-            if not subject_group:
-                raise HTTPException(status_code=404, detail="Subject group not found or doesn't belong to the specified grade/subject")
+            if subject_group is None:
+                raise HTTPException(status_code=404, detail="Subject group not found")
+            if subject_group.grade_id != effective_grade_id:
+                raise HTTPException(status_code=400, detail="Subject group grade mismatch")
         
         # Load prediction weights from database
         prediction_settings = db.query(PredictionSettings).filter(
@@ -2131,14 +2275,14 @@ async def upload_excel_grades(
                 # Find or create student
                 db_student = _find_existing_student_by_name_grade(
                     db=db,
-                    grade_id=grade_id,
+                    grade_id=effective_grade_id,
                     student_name=student_name
                 )
                 
                 if not db_student:
                     db_student = StudentInDB(
                         name=student_name,
-                        grade_id=grade_id,
+                    grade_id=effective_grade_id,
                         subgroup_id=subgroup_id
                     )
                     db.add(db_student)
@@ -2166,7 +2310,7 @@ async def upload_excel_grades(
                     db_score.predicted_scores = predicted_scores
                     db_score.danger_level = danger_level
                     db_score.delta_percentage = round(percentage_difference, 1)
-                    db_score.grade_id = grade_id
+                    db_score.grade_id = effective_grade_id
                     db_score.subgroup_id = subgroup_id
                     db_score.academic_year = current_year
                     if subject_group_id is not None:
@@ -2185,7 +2329,7 @@ async def upload_excel_grades(
                         semester=semester,
                         academic_year=current_year,
                         student_id=db_student.id,
-                        grade_id=grade_id,
+                        grade_id=effective_grade_id,
                         subgroup_id=subgroup_id,
                         subject_group_id=subject_group_id
                     )

@@ -8,6 +8,7 @@ from routes.auth import oauth2_scheme
 from typing import List, Optional
 
 router = APIRouter()
+GROUP_NAME_PATTERN = re.compile(r"^Group #\d+$")
 
 
 def parallel_int_from_grade_row(grade: Optional[GradeInDB]) -> Optional[int]:
@@ -46,6 +47,16 @@ def _serialize_subject_group(db: Session, g: SubjectGroupInDB) -> dict:
     }
 
 
+def _validate_group_name(name: str) -> str:
+    normalized = (name or "").strip()
+    if not GROUP_NAME_PATTERN.match(normalized):
+        raise HTTPException(
+            status_code=400,
+            detail="Group name must match format: Group #<number> (e.g., Group #1)",
+        )
+    return normalized
+
+
 def _get_user_from_token(db: Session, user_data: dict) -> Optional[UserInDB]:
     user = db.query(UserInDB).filter(UserInDB.email == user_data.get("sub")).first()
     if user:
@@ -56,12 +67,9 @@ def _get_user_from_token(db: Session, user_data: dict) -> Optional[UserInDB]:
     return None
 
 
-def _teacher_may_manage_subject_parallel(
-    db: Session, teacher_id: int, subject_id: int, anchor: GradeInDB
+def _teacher_may_manage_subject_for_groups(
+    db: Session, teacher_id: int, subject_id: int
 ) -> bool:
-    anchor_p = parallel_int_from_grade_row(anchor)
-    if anchor_p not in (11, 12):
-        return False
     assignments = (
         db.query(TeacherAssignmentInDB)
         .filter(
@@ -77,13 +85,13 @@ def _teacher_may_manage_subject_parallel(
         if a.grade_id is None:
             return True
         g = db.query(GradeInDB).filter(GradeInDB.id == a.grade_id).first()
-        if g and parallel_int_from_grade_row(g) == anchor_p:
+        if g and parallel_int_from_grade_row(g) in (11, 12):
             return True
     return False
 
 
 def _ensure_teacher_assignment_for_subject_group(
-    db: Session, teacher_id: int, subject_id: int, anchor_grade_id: int, subject_group_id: int
+    db: Session, teacher_id: int, subject_id: int, subject_group_id: int
 ) -> None:
     existing = (
         db.query(TeacherAssignmentInDB)
@@ -97,10 +105,27 @@ def _ensure_teacher_assignment_for_subject_group(
     )
     if existing:
         return
+    fallback_grade_id = None
+    base_rows = (
+        db.query(TeacherAssignmentInDB)
+        .filter(
+            TeacherAssignmentInDB.teacher_id == teacher_id,
+            TeacherAssignmentInDB.subject_id == subject_id,
+            TeacherAssignmentInDB.is_active == 1,
+            TeacherAssignmentInDB.grade_id.isnot(None),
+        )
+        .all()
+    )
+    for row in base_rows:
+        g = db.query(GradeInDB).filter(GradeInDB.id == row.grade_id).first()
+        if g and parallel_int_from_grade_row(g) in (11, 12):
+            fallback_grade_id = row.grade_id
+            break
+
     row = TeacherAssignmentInDB(
         teacher_id=teacher_id,
         subject_id=subject_id,
-        grade_id=anchor_grade_id,
+        grade_id=fallback_grade_id,
         subgroup_id=None,
         subject_group_id=subject_group_id,
         is_active=1,
@@ -110,6 +135,8 @@ def _ensure_teacher_assignment_for_subject_group(
 
 
 def _group_anchor_parallel(db: Session, group: SubjectGroupInDB) -> Optional[int]:
+    if group.grade_id is None:
+        return None
     g = db.query(GradeInDB).filter(GradeInDB.id == group.grade_id).first()
     return parallel_int_from_grade_row(g)
 
@@ -241,12 +268,13 @@ async def create_subject_group(
             detail="This subject is not enabled for subject groups (11–12). Enable it in the subject catalog first.",
         )
 
+    name_clean = _validate_group_name(data.name)
     existing = (
         db.query(SubjectGroupInDB)
         .filter(
             SubjectGroupInDB.grade_id == data.grade_id,
             SubjectGroupInDB.subject_id == data.subject_id,
-            SubjectGroupInDB.name == data.name.strip(),
+            SubjectGroupInDB.name == name_clean,
             SubjectGroupInDB.is_active == 1,
         )
         .first()
@@ -257,7 +285,7 @@ async def create_subject_group(
     db_group = SubjectGroupInDB(
         grade_id=data.grade_id,
         subject_id=data.subject_id,
-        name=data.name.strip(),
+        name=name_clean,
         is_active=1,
         owner_teacher_id=None,
     )
@@ -283,18 +311,12 @@ async def create_subject_group_teacher(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    anchor = db.query(GradeInDB).filter(GradeInDB.id == data.anchor_grade_id).first()
-    if not anchor:
-        raise HTTPException(status_code=404, detail="Anchor grade not found")
-    if not _grade_allows_subject_groups(anchor):
-        raise HTTPException(status_code=400, detail="Subject groups are only allowed for grades 11-12")
-
     # Admins skip the assignment check
     if user_data.get("type") != "admin":
-        if not _teacher_may_manage_subject_parallel(db, user.id, data.subject_id, anchor):
+        if not _teacher_may_manage_subject_for_groups(db, user.id, data.subject_id):
             raise HTTPException(
                 status_code=403,
-                detail="You are not assigned to teach this subject for this parallel",
+                detail="You are not assigned to teach this subject in grades 11-12",
             )
 
     subject = db.query(SubjectInDB).filter(SubjectInDB.id == data.subject_id).first()
@@ -306,22 +328,20 @@ async def create_subject_group_teacher(
             detail="This subject is not enabled for subject groups (11–12). Ask an administrator to enable it on the subject.",
         )
 
-    name_clean = data.name.strip()
-    existing = (
-        db.query(SubjectGroupInDB)
-        .filter(
-            SubjectGroupInDB.grade_id == data.anchor_grade_id,
-            SubjectGroupInDB.subject_id == data.subject_id,
-            SubjectGroupInDB.name == name_clean,
-            SubjectGroupInDB.is_active == 1,
-        )
-        .first()
+    name_clean = _validate_group_name(data.name)
+    existing_query = db.query(SubjectGroupInDB).filter(
+        SubjectGroupInDB.subject_id == data.subject_id,
+        SubjectGroupInDB.name == name_clean,
+        SubjectGroupInDB.is_active == 1,
     )
+    if user_data.get("type") != "admin":
+        existing_query = existing_query.filter(SubjectGroupInDB.owner_teacher_id == user.id)
+    existing = existing_query.first()
     if existing:
-        raise HTTPException(status_code=400, detail="Subject group with this name already exists for this class")
+        raise HTTPException(status_code=400, detail="Subject group with this name already exists")
 
     db_group = SubjectGroupInDB(
-        grade_id=data.anchor_grade_id,
+        grade_id=None,
         subject_id=data.subject_id,
         name=name_clean,
         is_active=1,
@@ -331,9 +351,7 @@ async def create_subject_group_teacher(
     db.commit()
     db.refresh(db_group)
 
-    _ensure_teacher_assignment_for_subject_group(
-        db, user.id, data.subject_id, data.anchor_grade_id, db_group.id
-    )
+    _ensure_teacher_assignment_for_subject_group(db, user.id, data.subject_id, db_group.id)
 
     return {"id": db_group.id, "message": "Subject group created successfully"}
 
@@ -365,6 +383,7 @@ async def update_subject_group(
 
     update_dict = update_data.dict(exclude_unset=True)
     if "name" in update_dict:
+        update_dict["name"] = _validate_group_name(update_dict["name"])
         existing = (
             db.query(SubjectGroupInDB)
             .filter(
@@ -492,10 +511,6 @@ async def add_subject_group_members(
 
     _require_group_manage_members(db, user_data, user, group)
 
-    anchor_p = _group_anchor_parallel(db, group)
-    if anchor_p is None:
-        raise HTTPException(status_code=400, detail="Cannot determine group parallel")
-
     added = 0
     errors: List[str] = []
     for sid in body.student_ids:
@@ -504,8 +519,8 @@ async def add_subject_group_members(
             errors.append(f"Student {sid} not found")
             continue
         sp = _student_parallel(db, sid)
-        if sp != anchor_p:
-            errors.append(f"Student {sid} is not in parallel {anchor_p}")
+        if sp not in (11, 12):
+            errors.append(f"Student {sid} is not in grade parallel 11/12")
             continue
         existing = (
             db.query(StudentSubjectGroupMembershipInDB)
@@ -580,7 +595,7 @@ async def get_subject_group_parallel_students(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
 ):
-    """All active students in the same numeric parallel (11 or 12) as the group anchor — for picking members across letters."""
+    """All active students from available 11/12 grades — candidates for classless subject group."""
     user_data = verify_access_token(token)
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
@@ -595,12 +610,8 @@ async def get_subject_group_parallel_students(
 
     _require_group_manage_members(db, user_data, user, group)
 
-    anchor_p = _group_anchor_parallel(db, group)
-    if anchor_p is None:
-        raise HTTPException(status_code=400, detail="Cannot determine group parallel")
-
     all_grades = db.query(GradeInDB).all()
-    grade_ids = [g.id for g in all_grades if parallel_int_from_grade_row(g) == anchor_p]
+    grade_ids = [g.id for g in all_grades if parallel_int_from_grade_row(g) in (11, 12)]
     if not grade_ids:
         return []
 

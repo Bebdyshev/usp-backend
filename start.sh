@@ -10,12 +10,14 @@ echo "--- Is DATABASE_URL set? ---"
 echo "DATABASE_URL: $DATABASE_URL"
 echo "------------------------------------"
 
-# Run database migrations
+# Run database migrations (requires DATABASE_URL in Coolify / runtime env)
 echo "Running database migrations..."
-# alembic upgrade head
-echo "Migrations step skipped for initial deployment."
-echo "Tables will be created by the application if they don't exist."
-echo "Migrations completed."
+if [ -z "$DATABASE_URL" ]; then
+  echo "WARNING: DATABASE_URL is not set; skipping alembic."
+else
+  alembic upgrade head
+fi
+echo "Migrations step finished."
 
 # Start the application
 echo "Starting application..."

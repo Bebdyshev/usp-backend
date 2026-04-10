@@ -412,7 +412,8 @@ class SubjectGroupInDB(Base):
     __tablename__ = "subject_groups"
 
     id = Column(Integer, primary_key=True, index=True)
-    grade_id = Column(Integer, ForeignKey("grades.id", ondelete="CASCADE"), nullable=False)
+    # Optional: group can be classless and span students from several classes.
+    grade_id = Column(Integer, ForeignKey("grades.id", ondelete="CASCADE"), nullable=True)
     subject_id = Column(Integer, ForeignKey("subjects.id", ondelete="CASCADE"), nullable=False)
     name = Column(String(100), nullable=False, index=True)
     is_active = Column(Integer, default=1, index=True)
@@ -565,7 +566,7 @@ class UpdateSubjectGroup(BaseModel):
 
 class SubjectGroupResponse(BaseModel):
     id: int
-    grade_id: int
+    grade_id: Optional[int] = None
     subject_id: int
     name: str
     is_active: int
@@ -582,7 +583,6 @@ class SubjectGroupResponse(BaseModel):
 class CreateTeacherSubjectGroup(BaseModel):
     subject_id: int
     name: str
-    anchor_grade_id: int
 
 
 class SubjectGroupMembersBulk(BaseModel):
