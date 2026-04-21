@@ -267,19 +267,36 @@ def parse_excel_grades(
             raise e
         raise HTTPException(status_code=500, detail=f"Unexpected error processing Excel file: {str(e)}")
 
-def generate_excel_template() -> bytes:
-    """Generate Excel template with proper column headers"""
-    
-    template_data = {
-        'ФИО': ['Иванов Иван Иванович', 'Петров Петр Петрович', 'Сидорова Анна Владимировна'],
-        'Процент за 1 предыдущий класс, %': [85.5, 92.0, 78.3],
-        'Q1, %': [88, 90, 82],
-        'Q2, %': [85, 94, 79],
-        'Q3, %': [None, 89, 85],  # Example of missing quarter
-        'Q4, %': [None, None, None],  # Future quarters
-        'Учитель, %': [87, 91, 80]
-    }
-    
+def generate_excel_template(student_names: Optional[List[str]] = None) -> bytes:
+    """Generate Excel template with proper column headers.
+
+    If ``student_names`` is provided, the ФИО column is pre-filled with those
+    names and all other columns are left blank so the user only has to enter
+    scores.
+    """
+
+    if student_names:
+        n = len(student_names)
+        template_data = {
+            'ФИО': list(student_names),
+            'Процент за 1 предыдущий класс, %': [None] * n,
+            'Q1, %': [None] * n,
+            'Q2, %': [None] * n,
+            'Q3, %': [None] * n,
+            'Q4, %': [None] * n,
+            'Учитель, %': [None] * n,
+        }
+    else:
+        template_data = {
+            'ФИО': ['Иванов Иван Иванович', 'Петров Петр Петрович', 'Сидорова Анна Владимировна'],
+            'Процент за 1 предыдущий класс, %': [85.5, 92.0, 78.3],
+            'Q1, %': [88, 90, 82],
+            'Q2, %': [85, 94, 79],
+            'Q3, %': [None, 89, 85],  # Example of missing quarter
+            'Q4, %': [None, None, None],  # Future quarters
+            'Учитель, %': [87, 91, 80]
+        }
+
     df = pd.DataFrame(template_data)
     
     # Create Excel file in memory

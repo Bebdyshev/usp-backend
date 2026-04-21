@@ -1011,26 +1011,67 @@ async def get_students_by_grade(
 
 @router.get("/template")
 async def download_excel_template(
-    token: str = Depends(oauth2_scheme)
+    grade_id: Optional[int] = None,
+    subject_group_id: Optional[int] = None,
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
 ):
-    """Download Excel template for grade upload"""
+    """Download Excel template for grade upload.
+
+    Optional filters pre-fill the student list:
+    - subject_group_id: members of the subject group (group mode)
+    - grade_id: students in the class (class mode)
+    """
     user_data = verify_access_token(token)
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
+
     # Allow both admin and teacher to download template
     if user_data.get("type") not in ["admin", "teacher"]:
         raise HTTPException(status_code=403, detail="Only admins and teachers can download template")
-    
+
     try:
-        template_content = generate_excel_template()
-        
+        student_names: Optional[List[str]] = None
+        if subject_group_id:
+            sg = db.query(SubjectGroupInDB).filter(
+                SubjectGroupInDB.id == subject_group_id,
+                SubjectGroupInDB.is_active == 1,
+            ).first()
+            if not sg:
+                raise HTTPException(status_code=404, detail="Subject group not found or inactive")
+            rows = (
+                db.query(StudentInDB)
+                .join(
+                    StudentSubjectGroupMembershipInDB,
+                    StudentInDB.id == StudentSubjectGroupMembershipInDB.student_id,
+                )
+                .filter(
+                    StudentSubjectGroupMembershipInDB.subject_group_id == subject_group_id,
+                    StudentSubjectGroupMembershipInDB.is_active == 1,
+                )
+                .order_by(StudentInDB.name.asc())
+                .all()
+            )
+            student_names = [s.name for s in rows if s.name]
+        elif grade_id:
+            rows = (
+                db.query(StudentInDB)
+                .filter(StudentInDB.grade_id == grade_id)
+                .order_by(StudentInDB.name.asc())
+                .all()
+            )
+            student_names = [s.name for s in rows if s.name]
+
+        template_content = generate_excel_template(student_names=student_names)
+
         return Response(
             content=template_content,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": "attachment; filename=grades_template.xlsx"}
         )
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating template: {str(e)}")
 
@@ -1862,8 +1903,8 @@ async def get_teacher_students(
 
 @router.post("/upload", response_model=ExcelUploadResponse)
 async def upload_excel_grades(
-    grade_id: int = Form(...),
-    subject_id: int = Form(...),
+    grade_id: Optional[int] = Form(None),
+    subject_id: Optional[int] = Form(None),
     teacher_name: str = Form(...),
     semester: int = Form(1),
     subgroup_id: Optional[int] = Form(None),
@@ -1873,27 +1914,53 @@ async def upload_excel_grades(
     db: Session = Depends(get_db),
 ):
     """
-    Upload Excel file with student grades
-    Requires: grade_id, subject_id, teacher_name, file
-    Optional: semester (default 1), subgroup_id, subject_group_id (for 11-12)
+    Upload Excel file with student grades.
+
+    Two modes:
+    - Class mode: provide grade_id + subject_id
+    - Subject-group mode: provide subject_group_id (grade_id/subject_id derived from the group)
     """
     try:
         # Verify access (admin or teacher)
         user_data = verify_access_token(token)
         if not user_data:
             raise HTTPException(status_code=401, detail="Invalid or expired token")
-        
+
         user_type = user_data.get("type")
         user_email = user_data.get("sub")
-        
+
         if user_type not in ["admin", "teacher"]:
             raise HTTPException(status_code=403, detail="Only admins and teachers can upload grades")
-        
+
         # Get user_id for teacher permission check
         user = db.query(UserInDB).filter(UserInDB.email == user_email).first()
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        
+
+        # Subject-group mode: derive grade_id and subject_id from the group
+        subject_group = None
+        if subject_group_id:
+            from schemas.models import SubjectGroupInDB
+            subject_group = db.query(SubjectGroupInDB).filter(
+                SubjectGroupInDB.id == subject_group_id,
+                SubjectGroupInDB.is_active == 1,
+            ).first()
+            if not subject_group:
+                raise HTTPException(status_code=404, detail="Subject group not found or inactive")
+            if grade_id and grade_id != subject_group.grade_id:
+                raise HTTPException(status_code=400, detail="grade_id does not match subject group")
+            if subject_id and subject_id != subject_group.subject_id:
+                raise HTTPException(status_code=400, detail="subject_id does not match subject group")
+            grade_id = subject_group.grade_id
+            subject_id = subject_group.subject_id
+            subgroup_id = None  # subgroups are orthogonal to subject groups
+
+        if not grade_id or not subject_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Provide subject_group_id, or both grade_id and subject_id",
+            )
+
         # If teacher, check if they have assignment for this subject/grade/subgroup/subject_group
         if user_type == "teacher":
             assignment_filters = [
@@ -1961,18 +2028,7 @@ async def upload_excel_grades(
             if not subgroup:
                 raise HTTPException(status_code=404, detail="Subgroup not found or doesn't belong to the specified grade")
 
-        # Validate subject_group if provided (grades 11-12 only)
-        subject_group = None
-        if subject_group_id:
-            from schemas.models import SubjectGroupInDB
-            subject_group = db.query(SubjectGroupInDB).filter(
-                SubjectGroupInDB.id == subject_group_id,
-                SubjectGroupInDB.grade_id == grade_id,
-                SubjectGroupInDB.subject_id == subject_id,
-                SubjectGroupInDB.is_active == 1
-            ).first()
-            if not subject_group:
-                raise HTTPException(status_code=404, detail="Subject group not found or doesn't belong to the specified grade/subject")
+        # subject_group was already resolved above (in subject-group mode)
         
         # Load prediction weights from database
         prediction_settings = db.query(PredictionSettings).filter(
@@ -2057,12 +2113,31 @@ async def upload_excel_grades(
                 danger_distribution[danger_level] += 1
                 
                 # Find or create student
-                db_student = _find_existing_student_by_name_grade(
-                    db=db,
-                    grade_id=grade_id,
-                    student_name=student_name
-                )
-                
+                db_student = None
+                if subject_group_id:
+                    normalized = _normalize_student_name(student_name)
+                    if normalized:
+                        db_student = (
+                            db.query(StudentInDB)
+                            .join(
+                                StudentSubjectGroupMembershipInDB,
+                                StudentInDB.id == StudentSubjectGroupMembershipInDB.student_id,
+                            )
+                            .filter(
+                                StudentSubjectGroupMembershipInDB.subject_group_id == subject_group_id,
+                                StudentSubjectGroupMembershipInDB.is_active == 1,
+                                func.lower(func.trim(StudentInDB.name)) == normalized.lower(),
+                            )
+                            .first()
+                        )
+
+                if not db_student:
+                    db_student = _find_existing_student_by_name_grade(
+                        db=db,
+                        grade_id=grade_id,
+                        student_name=student_name
+                    )
+
                 if not db_student:
                     db_student = StudentInDB(
                         name=student_name,
@@ -2076,6 +2151,21 @@ async def upload_excel_grades(
                     # Update subgroup if provided
                     if subgroup_id and db_student.subgroup_id != subgroup_id:
                         db_student.subgroup_id = subgroup_id
+
+                # Ensure group membership exists when uploading for a subject group
+                if subject_group_id:
+                    membership = db.query(StudentSubjectGroupMembershipInDB).filter(
+                        StudentSubjectGroupMembershipInDB.student_id == db_student.id,
+                        StudentSubjectGroupMembershipInDB.subject_group_id == subject_group_id,
+                    ).first()
+                    if not membership:
+                        db.add(StudentSubjectGroupMembershipInDB(
+                            student_id=db_student.id,
+                            subject_group_id=subject_group_id,
+                            is_active=1,
+                        ))
+                    elif membership.is_active != 1:
+                        membership.is_active = 1
                 
                 # Find existing score record for this student/subject/semester
                 db_score = db.query(ScoresInDB).filter(
