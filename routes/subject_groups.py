@@ -19,6 +19,16 @@ def parallel_int_from_grade_row(grade: Optional[GradeInDB]) -> Optional[int]:
 
 
 def _grade_allows_subject_groups(grade: GradeInDB) -> bool:
+    # Grade-anchored subject groups are allowed for parallels 7-12.
+    # Use cases:
+    #   - 7-10: within-class subdivisions for a specific subject (e.g. Kazakh Group #1 / #2)
+    #   - 11-12: anchored elective groups inside a single class
+    p = parallel_int_from_grade_row(grade)
+    return p is not None and 7 <= p <= 12
+
+
+def _grade_allows_classless_groups(grade: GradeInDB) -> bool:
+    # Classless cross-class groups (grade_id=None) remain an 11/12-only feature.
     p = parallel_int_from_grade_row(grade)
     return p in (11, 12)
 
@@ -85,7 +95,7 @@ def _teacher_may_manage_subject_for_groups(
         if a.grade_id is None:
             return True
         g = db.query(GradeInDB).filter(GradeInDB.id == a.grade_id).first()
-        if g and parallel_int_from_grade_row(g) in (11, 12):
+        if g and _grade_allows_subject_groups(g):
             return True
     return False
 
@@ -118,7 +128,7 @@ def _ensure_teacher_assignment_for_subject_group(
     )
     for row in base_rows:
         g = db.query(GradeInDB).filter(GradeInDB.id == row.grade_id).first()
-        if g and parallel_int_from_grade_row(g) in (11, 12):
+        if g and _grade_allows_subject_groups(g):
             fallback_grade_id = row.grade_id
             break
 
@@ -257,7 +267,7 @@ async def create_subject_group(
     if not grade:
         raise HTTPException(status_code=404, detail="Grade not found")
     if not _grade_allows_subject_groups(grade):
-        raise HTTPException(status_code=400, detail="Subject groups are only allowed for grades 11-12")
+        raise HTTPException(status_code=400, detail="Subject groups are only allowed for grades 7-12")
 
     subject = db.query(SubjectInDB).filter(SubjectInDB.id == data.subject_id).first()
     if not subject:
@@ -265,7 +275,7 @@ async def create_subject_group(
     if not subject.allows_subject_groups:
         raise HTTPException(
             status_code=400,
-            detail="This subject is not enabled for subject groups (11–12). Enable it in the subject catalog first.",
+            detail="This subject is not enabled for subject groups. Enable it in the subject catalog first.",
         )
 
     name_clean = _validate_group_name(data.name)
@@ -316,7 +326,7 @@ async def create_subject_group_teacher(
         if not _teacher_may_manage_subject_for_groups(db, user.id, data.subject_id):
             raise HTTPException(
                 status_code=403,
-                detail="You are not assigned to teach this subject in grades 11-12",
+                detail="You are not assigned to teach this subject",
             )
 
     subject = db.query(SubjectInDB).filter(SubjectInDB.id == data.subject_id).first()
@@ -325,7 +335,7 @@ async def create_subject_group_teacher(
     if not subject.allows_subject_groups:
         raise HTTPException(
             status_code=400,
-            detail="This subject is not enabled for subject groups (11–12). Ask an administrator to enable it on the subject.",
+            detail="This subject is not enabled for subject groups. Ask an administrator to enable it on the subject.",
         )
 
     name_clean = _validate_group_name(data.name)
@@ -513,15 +523,25 @@ async def add_subject_group_members(
 
     added = 0
     errors: List[str] = []
+    is_classless = group.grade_id is None
     for sid in body.student_ids:
         st = db.query(StudentInDB).filter(StudentInDB.id == sid).first()
         if not st:
             errors.append(f"Student {sid} not found")
             continue
-        sp = _student_parallel(db, sid)
-        if sp not in (11, 12):
-            errors.append(f"Student {sid} is not in grade parallel 11/12")
-            continue
+        if is_classless:
+            # Cross-class group: restricted to parallels 11/12.
+            sp = _student_parallel(db, sid)
+            if sp not in (11, 12):
+                errors.append(f"Student {sid} is not in grade parallel 11/12")
+                continue
+        else:
+            # Grade-anchored group (7-12): student must belong to this exact class.
+            if st.grade_id != group.grade_id:
+                errors.append(
+                    f"Student {sid} does not belong to this subject group's class"
+                )
+                continue
         existing = (
             db.query(StudentSubjectGroupMembershipInDB)
             .filter(

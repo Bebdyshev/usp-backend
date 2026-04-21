@@ -1195,26 +1195,66 @@ async def get_students_by_grade(
 
 @router.get("/template")
 async def download_excel_template(
-    token: str = Depends(oauth2_scheme)
+    grade_id: Optional[int] = None,
+    subject_group_id: Optional[int] = None,
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db),
 ):
-    """Download Excel template for grade upload"""
+    """Download Excel template for grade upload.
+
+    When *grade_id* or *subject_group_id* is provided the ФИО column is
+    pre-filled with the real students from that class / group so the teacher
+    only needs to enter grades.
+    """
     user_data = verify_access_token(token)
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
-    # Allow both admin and teacher to download template
+
     if user_data.get("type") not in ["admin", "teacher"]:
         raise HTTPException(status_code=403, detail="Only admins and teachers can download template")
-    
+
     try:
-        template_content = generate_excel_template()
-        
+        student_names: list[str] = []
+        filename = "grades_template.xlsx"
+
+        if subject_group_id:
+            # Fetch members of the subject group
+            membership_rows = (
+                db.query(StudentSubjectGroupMembershipInDB)
+                .filter(
+                    StudentSubjectGroupMembershipInDB.subject_group_id == subject_group_id,
+                    StudentSubjectGroupMembershipInDB.is_active == 1,
+                )
+                .all()
+            )
+            ids = [m.student_id for m in membership_rows]
+            if ids:
+                students = db.query(StudentInDB).filter(StudentInDB.id.in_(ids)).all()
+                student_names = [s.name for s in students if s.name]
+            group = db.query(SubjectGroupInDB).filter(SubjectGroupInDB.id == subject_group_id).first()
+            if group:
+                filename = f"template_{group.name.replace(' ', '_')}.xlsx"
+
+        elif grade_id:
+            students = (
+                db.query(StudentInDB)
+                .filter(StudentInDB.grade_id == grade_id)
+                .order_by(StudentInDB.name)
+                .all()
+            )
+            student_names = [s.name for s in students if s.name]
+            grade = db.query(GradeInDB).filter(GradeInDB.id == grade_id).first()
+            if grade:
+                filename = f"template_{grade.grade}.xlsx"
+
+        template_content = generate_excel_template(student_names if student_names else None)
+
         return Response(
             content=template_content,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": "attachment; filename=grades_template.xlsx"}
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating template: {str(e)}")
 
@@ -2098,9 +2138,13 @@ async def upload_excel_grades(
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
-        # If subject_group is chosen, it becomes the source of truth for grade/subject scope
+        # If subject_group is chosen, it becomes the source of truth for grade/subject scope.
+        # A subject group can be either grade-scoped (within-class subdivision for 7-10 or
+        # an anchored 11/12 elective) OR classless (cross-class 11/12 group with grade_id=None).
         effective_grade_id = grade_id
         subject_group = None
+        is_classless_group = False
+        group_member_student_ids: List[int] = []
         if subject_group_id:
             from schemas.models import SubjectGroupInDB
             subject_group = db.query(SubjectGroupInDB).filter(
@@ -2110,9 +2154,19 @@ async def upload_excel_grades(
             ).first()
             if not subject_group:
                 raise HTTPException(status_code=404, detail="Subject group not found or doesn't belong to the specified subject")
-            effective_grade_id = subject_group.grade_id
+            if subject_group.grade_id is not None:
+                # Grade-anchored group: override any caller-supplied grade_id
+                effective_grade_id = subject_group.grade_id
+            else:
+                # Classless cross-class group: students span multiple grades; match by membership
+                is_classless_group = True
+                membership_rows = db.query(StudentSubjectGroupMembershipInDB).filter(
+                    StudentSubjectGroupMembershipInDB.subject_group_id == subject_group_id,
+                    StudentSubjectGroupMembershipInDB.is_active == 1,
+                ).all()
+                group_member_student_ids = [m.student_id for m in membership_rows]
 
-        if effective_grade_id is None:
+        if effective_grade_id is None and not is_classless_group:
             raise HTTPException(status_code=400, detail="Specify grade_id or choose subject_group_id")
 
         # If teacher, check if they have assignment for this subject/grade/subgroup/subject_group
@@ -2121,11 +2175,16 @@ async def upload_excel_grades(
                 TeacherAssignmentInDB.teacher_id == user.id,
                 TeacherAssignmentInDB.subject_id == subject_id,
                 TeacherAssignmentInDB.is_active == 1,
-                or_(
-                    TeacherAssignmentInDB.grade_id == effective_grade_id,
-                    TeacherAssignmentInDB.grade_id == None
-                )
             ]
+            # For classless groups the concept of per-grade assignment doesn't apply —
+            # the subject_group_id filter below is sufficient.
+            if not is_classless_group:
+                assignment_filters.append(
+                    or_(
+                        TeacherAssignmentInDB.grade_id == effective_grade_id,
+                        TeacherAssignmentInDB.grade_id == None
+                    )
+                )
             if subgroup_id:
                 assignment_filters.append(
                     or_(
@@ -2152,29 +2211,34 @@ async def upload_excel_grades(
         if not file.filename.lower().endswith(('.xlsx', '.xls')):
             raise HTTPException(status_code=400, detail="Only Excel files (.xlsx, .xls) are allowed")
         
-        # Validate grade exists
-        grade = db.query(GradeInDB).filter(GradeInDB.id == effective_grade_id).first()
-        if not grade:
-            raise HTTPException(status_code=404, detail="Grade not found")
-        
+        # Validate grade exists (grade-scoped path only)
+        grade = None
+        if effective_grade_id is not None:
+            grade = db.query(GradeInDB).filter(GradeInDB.id == effective_grade_id).first()
+            if not grade:
+                raise HTTPException(status_code=404, detail="Grade not found")
+
         # Validate subject exists
         subject = db.query(SubjectInDB).filter(SubjectInDB.id == subject_id).first()
         if not subject:
             raise HTTPException(status_code=404, detail="Subject not found")
 
-        # Validate subject applicable for grade parallel
-        try:
-            grade_parallel_int = int(grade.parallel)
-        except Exception:
-            grade_parallel_int = None
-        if grade_parallel_int is not None:
-            applicable = subject.applicable_parallels or []
-            if len(applicable) > 0 and grade_parallel_int not in applicable:
-                raise HTTPException(status_code=400, detail=f"Subject '{subject.name}' is not applicable for parallel {grade.parallel}")
-        
-        # Validate subgroup if provided
+        # Validate subject applicable for grade parallel (skip for classless groups)
+        if grade is not None:
+            try:
+                grade_parallel_int = int(grade.parallel)
+            except Exception:
+                grade_parallel_int = None
+            if grade_parallel_int is not None:
+                applicable = subject.applicable_parallels or []
+                if len(applicable) > 0 and grade_parallel_int not in applicable:
+                    raise HTTPException(status_code=400, detail=f"Subject '{subject.name}' is not applicable for parallel {grade.parallel}")
+
+        # Validate subgroup if provided (incompatible with classless groups)
         subgroup = None
         if subgroup_id:
+            if is_classless_group:
+                raise HTTPException(status_code=400, detail="Subgroup cannot be combined with a classless subject group")
             subgroup = db.query(SubgroupInDB).filter(
                 SubgroupInDB.id == subgroup_id,
                 SubgroupInDB.grade_id == effective_grade_id
@@ -2182,8 +2246,8 @@ async def upload_excel_grades(
             if not subgroup:
                 raise HTTPException(status_code=404, detail="Subgroup not found or doesn't belong to the specified grade")
 
-        # Validate subject_group consistency with resolved grade (if provided)
-        if subject_group_id:
+        # Validate subject_group consistency with resolved grade (only for grade-anchored groups)
+        if subject_group_id and not is_classless_group:
             if subject_group is None:
                 raise HTTPException(status_code=404, detail="Subject group not found")
             if subject_group.grade_id != effective_grade_id:
@@ -2272,37 +2336,58 @@ async def upload_excel_grades(
 
                 danger_distribution[danger_level] += 1
                 
-                # Find or create student
-                db_student = _find_existing_student_by_name_grade(
-                    db=db,
-                    grade_id=effective_grade_id,
-                    student_name=student_name
-                )
-                
-                if not db_student:
-                    db_student = StudentInDB(
-                        name=student_name,
-                    grade_id=effective_grade_id,
-                        subgroup_id=subgroup_id
-                    )
-                    db.add(db_student)
-                    db.commit()
-                    db.refresh(db_student)
+                # Find student.
+                # Classless groups: match by name against group members (any grade).
+                # Grade-scoped (including 7-10 subject subgroups): match by name within that grade.
+                db_student = None
+                if is_classless_group:
+                    if group_member_student_ids:
+                        normalized_name = _normalize_student_name(student_name)
+                        if normalized_name:
+                            db_student = db.query(StudentInDB).filter(
+                                StudentInDB.id.in_(group_member_student_ids),
+                                func.lower(func.trim(StudentInDB.name)) == normalized_name.lower(),
+                            ).first()
+                    if not db_student:
+                        errors.append(
+                            f"Student '{student_name}' is not a member of the selected subject group"
+                        )
+                        continue
+                    score_grade_id = db_student.grade_id
                 else:
-                    # Update subgroup if provided
-                    if subgroup_id and db_student.subgroup_id != subgroup_id:
-                        db_student.subgroup_id = subgroup_id
-                
-                # Одна запись на ученика / предмет / семестр / текущий учебный год
-                db_score = db.query(ScoresInDB).filter(
+                    db_student = _find_existing_student_by_name_grade(
+                        db=db,
+                        grade_id=effective_grade_id,
+                        student_name=student_name,
+                    )
+                    if not db_student:
+                        db_student = StudentInDB(
+                            name=student_name,
+                            grade_id=effective_grade_id,
+                            subgroup_id=subgroup_id,
+                        )
+                        db.add(db_student)
+                        db.commit()
+                        db.refresh(db_student)
+                    else:
+                        if subgroup_id and db_student.subgroup_id != subgroup_id:
+                            db_student.subgroup_id = subgroup_id
+                    score_grade_id = effective_grade_id
+
+                # Одна запись на ученика / предмет / семестр / учебный год / (subject_group)
+                score_query = db.query(ScoresInDB).filter(
                     ScoresInDB.student_id == db_student.id,
                     ScoresInDB.subject_id == subject_id,
                     ScoresInDB.semester == semester,
                     ScoresInDB.academic_year == current_year,
-                ).first()
+                )
+                if subject_group_id is not None:
+                    score_query = score_query.filter(ScoresInDB.subject_group_id == subject_group_id)
+                else:
+                    score_query = score_query.filter(ScoresInDB.subject_group_id.is_(None))
+                db_score = score_query.first()
 
                 if db_score:
-                    # Update existing record
                     db_score.teacher_name = teacher_name
                     db_score.subject_name = subject.name
                     db_score.previous_class_score = previous_class_score
@@ -2310,13 +2395,12 @@ async def upload_excel_grades(
                     db_score.predicted_scores = predicted_scores
                     db_score.danger_level = danger_level
                     db_score.delta_percentage = round(percentage_difference, 1)
-                    db_score.grade_id = effective_grade_id
+                    db_score.grade_id = score_grade_id
                     db_score.subgroup_id = subgroup_id
                     db_score.academic_year = current_year
                     if subject_group_id is not None:
                         db_score.subject_group_id = subject_group_id
                 else:
-                    # Create new record
                     new_score = ScoresInDB(
                         teacher_name=teacher_name,
                         subject_name=subject.name,
@@ -2329,9 +2413,9 @@ async def upload_excel_grades(
                         semester=semester,
                         academic_year=current_year,
                         student_id=db_student.id,
-                        grade_id=effective_grade_id,
+                        grade_id=score_grade_id,
                         subgroup_id=subgroup_id,
-                        subject_group_id=subject_group_id
+                        subject_group_id=subject_group_id,
                     )
                     db.add(new_score)
                 

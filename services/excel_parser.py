@@ -357,42 +357,67 @@ def parse_excel_grades(
             raise e
         raise HTTPException(status_code=500, detail=f"Unexpected error processing Excel file: {str(e)}")
 
-def generate_excel_template() -> bytes:
-    """Generate Excel template with proper column headers"""
-    
-    template_data = {
-        'ФИО': ['Иванов Иван Иванович', 'Петров Петр Петрович', 'Сидорова Анна Владимировна'],
-        'Процент за 1 предыдущий класс, %': [85.5, 92.0, 78.3],
-        'Q1, %': [88, 90, 82],
-        'Q2, %': [85, 94, 79],
-        'Q3, %': [None, 89, 85],  # Example of missing quarter
-        'Q4, %': [None, None, None],  # Future quarters
-        'Учитель, %': [87, 91, 80]
-    }
-    
+def generate_excel_template(student_names: list[str] | None = None) -> bytes:
+    """Generate Excel template with proper column headers.
+
+    If *student_names* is supplied the ФИО column is pre-filled with real
+    student names and the score columns are left empty so the teacher only
+    needs to fill in grades.  When no names are provided a small demo table
+    with example values is produced instead.
+    """
+    if student_names:
+        n = len(student_names)
+        template_data = {
+            'ФИО': student_names,
+            'Процент за 1 предыдущий класс, %': [None] * n,
+            'Q1, %': [None] * n,
+            'Q2, %': [None] * n,
+            'Q3, %': [None] * n,
+            'Q4, %': [None] * n,
+            'Учитель, %': [None] * n,
+        }
+    else:
+        template_data = {
+            'ФИО': ['Иванов Иван Иванович', 'Петров Петр Петрович', 'Сидорова Анна Владимировна'],
+            'Процент за 1 предыдущий класс, %': [85.5, 92.0, 78.3],
+            'Q1, %': [88, 90, 82],
+            'Q2, %': [85, 94, 79],
+            'Q3, %': [None, 89, 85],
+            'Q4, %': [None, None, None],
+            'Учитель, %': [87, 91, 80],
+        }
+
     df = pd.DataFrame(template_data)
-    
-    # Create Excel file in memory
+
     output = BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, sheet_name='Grades', index=False)
-        
-        # Format the worksheet
+
         worksheet = writer.sheets['Grades']
-        
+
+        # Style header row
+        from openpyxl.styles import Font, PatternFill, Alignment
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        header_font = Font(color="FFFFFF", bold=True)
+        for cell in worksheet[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+
+        # Light-blue fill for name column so it stands out
+        name_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+        for row in worksheet.iter_rows(min_row=2, min_col=1, max_col=1):
+            for cell in row:
+                cell.fill = name_fill
+
         # Auto-adjust column widths
         for column in worksheet.columns:
-            max_length = 0
-            column_letter = column[0].column_letter
-            for cell in column:
-                try:
-                    if len(str(cell.value)) > max_length:
-                        max_length = len(str(cell.value))
-                except:
-                    pass
-            adjusted_width = min(max_length + 2, 30)
-            worksheet.column_dimensions[column_letter].width = adjusted_width
-    
+            max_length = max(
+                (len(str(cell.value)) for cell in column if cell.value is not None),
+                default=8,
+            )
+            worksheet.column_dimensions[column[0].column_letter].width = min(max_length + 3, 40)
+
     output.seek(0)
     return output.getvalue()
 

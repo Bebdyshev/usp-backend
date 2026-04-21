@@ -10,6 +10,8 @@ from schemas.models import (
     CuratorGradeInDB,
     TeacherAssignmentInDB,
     SubjectGroupInDB,
+    StudentSubjectGroupMembershipInDB,
+    StudentInDB,
     SubjectInDB,
 )
 from typing import List, Optional, Set
@@ -60,22 +62,55 @@ def get_user_allowed_grade_ids(user_data: dict, db: Session) -> Optional[Set[int
             allowed_grades.add(grade.id)
     
     elif user_type == "teacher":
-        # Get grades assigned to this teacher via TeacherAssignmentInDB
+        # Grades assigned to this teacher via TeacherAssignmentInDB
         teacher_assignments = db.query(TeacherAssignmentInDB).filter(
             TeacherAssignmentInDB.teacher_id == user.id,
             TeacherAssignmentInDB.is_active == 1
         ).all()
+        teacher_subject_group_ids: Set[int] = set()
         for assignment in teacher_assignments:
             if assignment.grade_id:
                 allowed_grades.add(assignment.grade_id)
-            elif assignment.subject_group_id:
-                # Resolve grade_id from the linked subject group
+            if assignment.subject_group_id:
+                teacher_subject_group_ids.add(assignment.subject_group_id)
+                # For grade-anchored groups, also surface that class
                 subject_group = db.query(SubjectGroupInDB).filter(
                     SubjectGroupInDB.id == assignment.subject_group_id
                 ).first()
                 if subject_group and subject_group.grade_id:
                     allowed_grades.add(subject_group.grade_id)
-    
+
+        # Teacher-owned subject groups (created via /subject-groups/teacher)
+        owned_groups = db.query(SubjectGroupInDB).filter(
+            SubjectGroupInDB.owner_teacher_id == user.id,
+            SubjectGroupInDB.is_active == 1,
+        ).all()
+        for g in owned_groups:
+            teacher_subject_group_ids.add(g.id)
+            if g.grade_id:
+                allowed_grades.add(g.grade_id)
+
+        # For classless (cross-class) groups: add the home grade of every member
+        # so analytics queries that filter by grade_id still surface these students.
+        if teacher_subject_group_ids:
+            rows = (
+                db.query(StudentInDB.grade_id)
+                .join(
+                    StudentSubjectGroupMembershipInDB,
+                    StudentSubjectGroupMembershipInDB.student_id == StudentInDB.id,
+                )
+                .filter(
+                    StudentSubjectGroupMembershipInDB.subject_group_id.in_(teacher_subject_group_ids),
+                    StudentSubjectGroupMembershipInDB.is_active == 1,
+                    StudentInDB.is_active == 1,
+                )
+                .distinct()
+                .all()
+            )
+            for (gid,) in rows:
+                if gid is not None:
+                    allowed_grades.add(gid)
+
     return allowed_grades
 
 
