@@ -6,7 +6,7 @@ from schemas.models import ScoresInDB, StudentInDB, GradeInDB
 from auth_utils import verify_access_token
 from routes.auth import oauth2_scheme
 from config import get_db 
-from role_utils import get_user_allowed_grade_ids
+from role_utils import get_user_allowed_grade_ids, get_user_allowed_subject_ids
 import re
 
 
@@ -23,24 +23,31 @@ def get_danger_level_stats(
 
     # Get allowed grade IDs for the current user
     allowed_grade_ids = get_user_allowed_grade_ids(user_data, db)
-    
+    allowed_subject_ids = get_user_allowed_subject_ids(user_data, db)
+
+    empty_response = {
+        "danger_level_stats": {
+            0: {"student_count": 0, "avg_delta_percentage": 0},
+            1: {"student_count": 0, "avg_delta_percentage": 0},
+            2: {"student_count": 0, "avg_delta_percentage": 0},
+            3: {"student_count": 0, "avg_delta_percentage": 0},
+            "total_students": 0,
+            "avg_danger_level": 0
+        },
+        "all_dangerous_classes": []
+    }
+
     # Build query for scores - filter by allowed grades if not admin
     scores_query = db.query(ScoresInDB.student_id, ScoresInDB.danger_level, ScoresInDB.grade_id)
     if allowed_grade_ids is not None:  # Not admin
         if not allowed_grade_ids:  # Empty set - no access
-            return {
-                "danger_level_stats": {
-                    0: {"student_count": 0, "avg_delta_percentage": 0},
-                    1: {"student_count": 0, "avg_delta_percentage": 0},
-                    2: {"student_count": 0, "avg_delta_percentage": 0},
-                    3: {"student_count": 0, "avg_delta_percentage": 0},
-                    "total_students": 0,
-                    "avg_danger_level": 0
-                },
-                "all_dangerous_classes": []
-            }
+            return empty_response
         scores_query = scores_query.filter(ScoresInDB.grade_id.in_(allowed_grade_ids))
-    
+    if allowed_subject_ids is not None:  # Teacher
+        if not allowed_subject_ids:
+            return empty_response
+        scores_query = scores_query.filter(ScoresInDB.subject_id.in_(allowed_subject_ids))
+
     scores_data = scores_query.all()
 
     # Group by student
@@ -91,9 +98,11 @@ def get_danger_level_stats(
         func.avg(ScoresInDB.danger_level).label("avg_danger_level")
     ).join(StudentInDB, StudentInDB.grade_id == GradeInDB.id) \
      .join(ScoresInDB, ScoresInDB.student_id == StudentInDB.id)
-    
+
     if allowed_grade_ids is not None:
         dangerous_classes_query = dangerous_classes_query.filter(GradeInDB.id.in_(allowed_grade_ids))
+    if allowed_subject_ids is not None:
+        dangerous_classes_query = dangerous_classes_query.filter(ScoresInDB.subject_id.in_(allowed_subject_ids))
     
     dangerous_classes = dangerous_classes_query.group_by(GradeInDB.grade) \
      .order_by(func.avg(ScoresInDB.danger_level).desc()).all()
@@ -119,22 +128,28 @@ def get_class_danger_percentages(
 
     # Get allowed grade IDs for the current user
     allowed_grade_ids = get_user_allowed_grade_ids(user_data, db)
+    allowed_subject_ids = get_user_allowed_subject_ids(user_data, db)
+
+    empty_pie = {
+        "class_danger_percentages": [],
+        "overall_danger_summary": {
+            "total_danger_students": 0,
+            "percentage_of_all_students": 0.00
+        }
+    }
+
+    if allowed_subject_ids is not None and not allowed_subject_ids:
+        return empty_pie
 
     # Build base query with optional filtering
     total_students_query = db.query(
         GradeInDB.grade,
         func.count(StudentInDB.id)
     ).join(StudentInDB, StudentInDB.grade_id == GradeInDB.id)
-    
+
     if allowed_grade_ids is not None:
         if not allowed_grade_ids:  # Empty set - no access
-            return {
-                "class_danger_percentages": [],
-                "overall_danger_summary": {
-                    "total_danger_students": 0,
-                    "percentage_of_all_students": 0.00
-                }
-            }
+            return empty_pie
         total_students_query = total_students_query.filter(GradeInDB.id.in_(allowed_grade_ids))
     
     total_students_by_class = total_students_query.group_by(GradeInDB.grade).all()
@@ -157,9 +172,11 @@ def get_class_danger_percentages(
         func.count(ScoresInDB.student_id).label("student_count")
     ).join(StudentInDB, StudentInDB.grade_id == GradeInDB.id) \
      .join(ScoresInDB, ScoresInDB.student_id == StudentInDB.id)
-    
+
     if allowed_grade_ids is not None:
         class_danger_query = class_danger_query.filter(GradeInDB.id.in_(allowed_grade_ids))
+    if allowed_subject_ids is not None:
+        class_danger_query = class_danger_query.filter(ScoresInDB.subject_id.in_(allowed_subject_ids))
     
     class_danger_stats = class_danger_query.group_by(GradeInDB.grade, ScoresInDB.danger_level) \
      .order_by(GradeInDB.grade, ScoresInDB.danger_level).all()
@@ -218,6 +235,18 @@ def get_actionable_insights(
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     allowed_grade_ids = get_user_allowed_grade_ids(user_data, db)
+    allowed_subject_ids = get_user_allowed_subject_ids(user_data, db)
+
+    empty_insights = {
+        "at_risk_students": [],
+        "problem_classes": [],
+        "subject_analysis": [],
+        "recommendations": [],
+        "summary": {"total_students": 0, "at_risk_count": 0, "critical_count": 0}
+    }
+
+    if allowed_subject_ids is not None and not allowed_subject_ids:
+        return empty_insights
 
     # --- FILTERING ---
     # Apply Filters to allowed_grade_ids
@@ -254,15 +283,11 @@ def get_actionable_insights(
     
     if allowed_grade_ids is not None:
         if not allowed_grade_ids:
-            return {
-                "at_risk_students": [],
-                "problem_classes": [],
-                "subject_analysis": [],
-                "recommendations": [],
-                "summary": {"total_students": 0, "at_risk_count": 0, "critical_count": 0}
-            }
+            return empty_insights
         at_risk_query = at_risk_query.filter(GradeInDB.id.in_(allowed_grade_ids))
-    
+    if allowed_subject_ids is not None:
+        at_risk_query = at_risk_query.filter(ScoresInDB.subject_id.in_(allowed_subject_ids))
+
     at_risk_students = at_risk_query.group_by(
         StudentInDB.id, StudentInDB.name, GradeInDB.grade, GradeInDB.parallel
     ).having(func.avg(ScoresInDB.danger_level) >= 2) \
@@ -293,7 +318,9 @@ def get_actionable_insights(
     
     if allowed_grade_ids is not None:
         problem_classes_query = problem_classes_query.filter(GradeInDB.id.in_(allowed_grade_ids))
-    
+    if allowed_subject_ids is not None:
+        problem_classes_query = problem_classes_query.filter(ScoresInDB.subject_id.in_(allowed_subject_ids))
+
     problem_classes = problem_classes_query.group_by(
         GradeInDB.id, GradeInDB.grade, GradeInDB.parallel, GradeInDB.curator_name
     ).having(func.avg(ScoresInDB.danger_level) >= 1.5) \
@@ -321,7 +348,9 @@ def get_actionable_insights(
     
     if allowed_grade_ids is not None:
         subject_query = subject_query.filter(ScoresInDB.grade_id.in_(allowed_grade_ids))
-    
+    if allowed_subject_ids is not None:
+        subject_query = subject_query.filter(ScoresInDB.subject_id.in_(allowed_subject_ids))
+
     subject_stats = subject_query.filter(ScoresInDB.subject_name.isnot(None)) \
      .group_by(ScoresInDB.subject_name) \
      .order_by(func.avg(ScoresInDB.danger_level).desc()).all()
@@ -389,6 +418,8 @@ def get_actionable_insights(
         .join(ScoresInDB, ScoresInDB.student_id == StudentInDB.id)
     if allowed_grade_ids is not None:
         at_risk_count_query = at_risk_count_query.filter(StudentInDB.grade_id.in_(allowed_grade_ids))
+    if allowed_subject_ids is not None:
+        at_risk_count_query = at_risk_count_query.filter(ScoresInDB.subject_id.in_(allowed_subject_ids))
     # Count students with any danger level >= 2
     at_risk_total = at_risk_count_query.filter(ScoresInDB.danger_level >= 2).scalar() or 0
     critical_total = at_risk_count_query.filter(ScoresInDB.danger_level >= 3).scalar() or 0

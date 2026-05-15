@@ -4,6 +4,7 @@ from config import get_db
 from schemas.models import *
 from auth_utils import verify_access_token
 from routes.auth import oauth2_scheme
+from role_utils import get_user_allowed_grade_ids, check_grade_access
 from typing import List, Optional
 from datetime import datetime
 
@@ -22,9 +23,19 @@ async def get_achievements(
     user_data = verify_access_token(token)
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
+
+    allowed_grade_ids = get_user_allowed_grade_ids(user_data, db)
+
     query = db.query(AchievementInDB)
-    
+
+    # Role-based scoping: limit to students in grades the user is allowed to see.
+    if allowed_grade_ids is not None:
+        if not allowed_grade_ids:
+            return []
+        query = query.join(
+            StudentInDB, StudentInDB.id == AchievementInDB.student_id
+        ).filter(StudentInDB.grade_id.in_(allowed_grade_ids))
+
     # Apply filters
     if student_id:
         query = query.filter(AchievementInDB.student_id == student_id)
@@ -87,7 +98,11 @@ async def create_achievement(
     ).first()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
-    
+
+    # Non-admins can only act on students in grades they have access to.
+    if not check_grade_access(user_data, student.grade_id, db):
+        raise HTTPException(status_code=403, detail="You don't have access to this student")
+
     # Validate points (non-negative)
     if achievement.points < 0:
         raise HTTPException(
@@ -136,11 +151,15 @@ async def update_achievement(
     ).first()
     if not achievement:
         raise HTTPException(status_code=404, detail="Achievement not found")
-    
+
+    target_student = db.query(StudentInDB).filter(StudentInDB.id == achievement.student_id).first()
+    if target_student and not check_grade_access(user_data, target_student.grade_id, db):
+        raise HTTPException(status_code=403, detail="You don't have access to this student")
+
     # Only admin or the original awarder can update
     if user_data.get("type") != "admin" and achievement.awarded_by != user_data.get("id"):
         raise HTTPException(
-            status_code=403, 
+            status_code=403,
             detail="You can only update your own achievements"
         )
     
@@ -208,7 +227,10 @@ async def get_student_achievements(
     student = db.query(StudentInDB).filter(StudentInDB.id == student_id).first()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
-    
+
+    if not check_grade_access(user_data, student.grade_id, db):
+        raise HTTPException(status_code=403, detail="You don't have access to this student")
+
     achievements = db.query(AchievementInDB).filter(
         AchievementInDB.student_id == student_id
     ).order_by(AchievementInDB.achievement_date.desc()).all()
@@ -263,13 +285,33 @@ async def get_achievement_statistics(
     user_data = verify_access_token(token)
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
+
+    allowed_grade_ids = get_user_allowed_grade_ids(user_data, db)
+
     query = db.query(AchievementInDB)
-    
+    joined_students = False
+
+    if allowed_grade_ids is not None:
+        if not allowed_grade_ids:
+            return {
+                "total_achievements": 0,
+                "total_points": 0,
+                "average_points_per_achievement": 0,
+                "category_distribution": {},
+                "category_points": {},
+                "top_achievers": [],
+            }
+        query = query.join(
+            StudentInDB, StudentInDB.id == AchievementInDB.student_id
+        ).filter(StudentInDB.grade_id.in_(allowed_grade_ids))
+        joined_students = True
+
     # Filter by grade if specified
     if grade_id:
-        query = query.join(StudentInDB).filter(StudentInDB.grade_id == grade_id)
-    
+        if not joined_students:
+            query = query.join(StudentInDB, StudentInDB.id == AchievementInDB.student_id)
+        query = query.filter(StudentInDB.grade_id == grade_id)
+
     achievements = query.all()
     
     # Calculate statistics

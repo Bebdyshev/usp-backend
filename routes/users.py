@@ -57,7 +57,10 @@ async def get_users_by_type(
     user_data = verify_access_token(token)
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
+
+    if user_data.get("type") not in ("admin", "curator"):
+        raise HTTPException(status_code=403, detail="Only admins and curators can list users by type")
+
     # Validate user type
     valid_types = ['admin', 'curator', 'teacher', 'user']
     if user_type not in valid_types:

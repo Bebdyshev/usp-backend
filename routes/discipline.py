@@ -4,6 +4,7 @@ from config import get_db
 from schemas.models import *
 from auth_utils import verify_access_token
 from routes.auth import oauth2_scheme
+from role_utils import get_user_allowed_grade_ids, check_grade_access
 from typing import List, Optional
 from datetime import datetime
 
@@ -23,9 +24,19 @@ async def get_disciplinary_actions(
     user_data = verify_access_token(token)
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
+
+    allowed_grade_ids = get_user_allowed_grade_ids(user_data, db)
+
     query = db.query(DisciplinaryActionInDB)
-    
+
+    # Role-based scoping: limit to students in grades the user is allowed to see.
+    if allowed_grade_ids is not None:
+        if not allowed_grade_ids:
+            return []
+        query = query.join(
+            StudentInDB, StudentInDB.id == DisciplinaryActionInDB.student_id
+        ).filter(StudentInDB.grade_id.in_(allowed_grade_ids))
+
     # Apply filters
     if student_id:
         query = query.filter(DisciplinaryActionInDB.student_id == student_id)
@@ -90,7 +101,11 @@ async def create_disciplinary_action(
     ).first()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
-    
+
+    # Non-admins can only act on students in grades they have access to.
+    if not check_grade_access(user_data, student.grade_id, db):
+        raise HTTPException(status_code=403, detail="You don't have access to this student")
+
     # Validate severity level
     if action.severity_level < 1 or action.severity_level > 5:
         raise HTTPException(
@@ -137,11 +152,15 @@ async def update_disciplinary_action(
     ).first()
     if not action:
         raise HTTPException(status_code=404, detail="Disciplinary action not found")
-    
+
+    target_student = db.query(StudentInDB).filter(StudentInDB.id == action.student_id).first()
+    if target_student and not check_grade_access(user_data, target_student.grade_id, db):
+        raise HTTPException(status_code=403, detail="You don't have access to this student")
+
     # Only admin or the original issuer can update
     if user_data.get("type") != "admin" and action.issued_by != user_data.get("id"):
         raise HTTPException(
-            status_code=403, 
+            status_code=403,
             detail="You can only update your own disciplinary actions"
         )
     
@@ -210,7 +229,10 @@ async def get_student_disciplinary_actions(
     student = db.query(StudentInDB).filter(StudentInDB.id == student_id).first()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
-    
+
+    if not check_grade_access(user_data, student.grade_id, db):
+        raise HTTPException(status_code=403, detail="You don't have access to this student")
+
     actions = db.query(DisciplinaryActionInDB).filter(
         DisciplinaryActionInDB.student_id == student_id
     ).order_by(DisciplinaryActionInDB.action_date.desc()).all()
@@ -249,13 +271,33 @@ async def get_discipline_statistics(
     user_data = verify_access_token(token)
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    
+
+    allowed_grade_ids = get_user_allowed_grade_ids(user_data, db)
+
     query = db.query(DisciplinaryActionInDB)
-    
+    joined_students = False
+
+    if allowed_grade_ids is not None:
+        if not allowed_grade_ids:
+            return {
+                "total_actions": 0,
+                "resolved_actions": 0,
+                "unresolved_actions": 0,
+                "resolution_rate": 0,
+                "severity_distribution": {1: 0, 2: 0, 3: 0, 4: 0, 5: 0},
+                "action_type_distribution": {},
+            }
+        query = query.join(
+            StudentInDB, StudentInDB.id == DisciplinaryActionInDB.student_id
+        ).filter(StudentInDB.grade_id.in_(allowed_grade_ids))
+        joined_students = True
+
     # Filter by grade if specified
     if grade_id:
-        query = query.join(StudentInDB).filter(StudentInDB.grade_id == grade_id)
-    
+        if not joined_students:
+            query = query.join(StudentInDB, StudentInDB.id == DisciplinaryActionInDB.student_id)
+        query = query.filter(StudentInDB.grade_id == grade_id)
+
     actions = query.all()
     
     # Calculate statistics
