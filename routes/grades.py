@@ -10,6 +10,7 @@ from routes.auth import oauth2_scheme
 from role_utils import (
     get_user_allowed_grade_ids,
     get_user_allowed_subject_ids,
+    get_user_allowed_subject_group_ids,
     check_grade_access,
     get_user_from_token,
     compute_show_subject_groups_nav_for_user,
@@ -600,12 +601,20 @@ def get_class_data(
 
         # Subject groups as "virtual classes" for analytics:
         # each group is a separate class-like bucket across real classes.
-        groups_query = db.query(SubjectGroupInDB).filter(SubjectGroupInDB.is_active == 1)
-        if subject:
-            groups_query = groups_query.join(
-                SubjectInDB, SubjectInDB.id == SubjectGroupInDB.subject_id
-            ).filter(SubjectInDB.name == subject)
-        subject_groups = groups_query.all()
+        allowed_group_ids = get_user_allowed_subject_group_ids(user_data, db)
+        if allowed_group_ids is not None and not allowed_group_ids:
+            subject_groups = []
+        else:
+            groups_query = db.query(SubjectGroupInDB).filter(SubjectGroupInDB.is_active == 1)
+            if allowed_group_ids is not None:
+                groups_query = groups_query.filter(SubjectGroupInDB.id.in_(allowed_group_ids))
+            if allowed_subject_ids is not None:
+                groups_query = groups_query.filter(SubjectGroupInDB.subject_id.in_(allowed_subject_ids))
+            if subject:
+                groups_query = groups_query.join(
+                    SubjectInDB, SubjectInDB.id == SubjectGroupInDB.subject_id
+                ).filter(SubjectInDB.name == subject)
+            subject_groups = groups_query.all()
 
         for sg in subject_groups:
             member_rows = db.query(StudentSubjectGroupMembershipInDB).filter(

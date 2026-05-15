@@ -147,6 +147,47 @@ def get_user_allowed_subject_ids(user_data: dict, db: Session) -> Optional[Set[i
     return allowed_subjects
 
 
+def get_user_allowed_subject_group_ids(user_data: dict, db: Session) -> Optional[Set[int]]:
+    """
+    Get the set of SubjectGroup IDs a user is allowed to see.
+
+    Returns:
+        - None for admin / curator (no group-level restriction)
+        - Set of group IDs for teacher: groups they own + groups they're assigned to
+        - Empty set if the teacher has no groups
+    """
+    user_type = user_data.get("type")
+
+    if user_type in ("admin", "curator"):
+        return None
+
+    user = get_user_from_token(user_data, db)
+    if not user:
+        return set()
+
+    group_ids: Set[int] = set()
+
+    if user_type == "teacher":
+        owned_rows = db.query(SubjectGroupInDB.id).filter(
+            SubjectGroupInDB.owner_teacher_id == user.id,
+            SubjectGroupInDB.is_active == 1,
+        ).all()
+        for (gid,) in owned_rows:
+            if gid is not None:
+                group_ids.add(gid)
+
+        assigned_rows = db.query(TeacherAssignmentInDB.subject_group_id).filter(
+            TeacherAssignmentInDB.teacher_id == user.id,
+            TeacherAssignmentInDB.is_active == 1,
+            TeacherAssignmentInDB.subject_group_id.isnot(None),
+        ).all()
+        for (gid,) in assigned_rows:
+            if gid is not None:
+                group_ids.add(gid)
+
+    return group_ids
+
+
 def check_grade_access(user_data: dict, grade_id: int, db: Session) -> bool:
     """
     Check if a user has access to a specific grade.

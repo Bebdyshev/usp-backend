@@ -5,6 +5,11 @@ from config import get_db
 from schemas.models import *
 from auth_utils import verify_access_token
 from routes.auth import oauth2_scheme
+from role_utils import (
+    get_user_allowed_grade_ids,
+    get_user_allowed_subject_ids,
+    get_user_allowed_subject_group_ids,
+)
 from typing import List, Optional
 
 router = APIRouter()
@@ -176,7 +181,19 @@ async def get_subject_groups(
     if not user_data:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
+    allowed_group_ids = get_user_allowed_subject_group_ids(user_data, db)
+    if allowed_group_ids is not None and not allowed_group_ids:
+        return []
+
+    allowed_subject_ids = get_user_allowed_subject_ids(user_data, db)
+
     query = db.query(SubjectGroupInDB).filter(SubjectGroupInDB.is_active == 1)
+    if allowed_group_ids is not None:
+        query = query.filter(SubjectGroupInDB.id.in_(allowed_group_ids))
+    if allowed_subject_ids is not None:
+        if not allowed_subject_ids:
+            return []
+        query = query.filter(SubjectGroupInDB.subject_id.in_(allowed_subject_ids))
 
     if grade_id:
         query = query.filter(SubjectGroupInDB.grade_id == grade_id)
@@ -240,14 +257,23 @@ async def get_subject_groups_by_grade(
     if not _grade_allows_subject_groups(grade):
         return []
 
-    groups = (
-        db.query(SubjectGroupInDB)
-        .filter(
-            SubjectGroupInDB.grade_id == grade_id,
-            SubjectGroupInDB.is_active == 1,
-        )
-        .all()
+    allowed_group_ids = get_user_allowed_subject_group_ids(user_data, db)
+    if allowed_group_ids is not None and not allowed_group_ids:
+        return []
+
+    allowed_subject_ids = get_user_allowed_subject_ids(user_data, db)
+    if allowed_subject_ids is not None and not allowed_subject_ids:
+        return []
+
+    q = db.query(SubjectGroupInDB).filter(
+        SubjectGroupInDB.grade_id == grade_id,
+        SubjectGroupInDB.is_active == 1,
     )
+    if allowed_group_ids is not None:
+        q = q.filter(SubjectGroupInDB.id.in_(allowed_group_ids))
+    if allowed_subject_ids is not None:
+        q = q.filter(SubjectGroupInDB.subject_id.in_(allowed_subject_ids))
+    groups = q.all()
     return [_serialize_subject_group(db, g) for g in groups]
 
 
