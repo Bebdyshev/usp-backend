@@ -46,7 +46,7 @@ def _sync_score_prediction_with_actual(score: ScoresInDB, db: Session) -> None:
     pred, dlevel, dpct = recalculate_predicted_and_danger_from_actual(
         act,
         score.previous_class_score,
-        None,
+        score.teacher_percent,
         weights,
     )
     score.predicted_scores = pred
@@ -691,7 +691,7 @@ def get_class_data(
             class_data.append({
                 "curator_name": None,
                 "subject_name": subject or (sg.subject.name if getattr(sg, "subject", None) else None),
-                "grade_liter": f"Группа: {sg.name}",
+                "grade_liter": sg.name,
                 "grade_id": -(sg.id),
                 "is_subject_group": True,
                 "subject_group_id": sg.id,
@@ -1733,7 +1733,8 @@ async def get_student_scores(
             "updated_at": score.updated_at,
             "student_id": score.student_id,
             "grade_id": score.grade_id,
-            "previous_class_score": score.previous_class_score
+            "previous_class_score": score.previous_class_score,
+            "teacher_percent": score.teacher_percent,
         })
         
     return result
@@ -1812,7 +1813,11 @@ async def update_score(
         if hasattr(score, key):
             setattr(score, key, value)
 
-    if "actual_scores" in update_dict and score.actual_scores is not None:
+    if (
+        "actual_scores" in update_dict
+        or "previous_class_score" in update_dict
+        or "teacher_percent" in update_dict
+    ) and score.actual_scores is not None:
         _sync_score_prediction_with_actual(score, db)
 
     db.commit()
@@ -2333,18 +2338,7 @@ async def upload_excel_grades(
             if subject_group.grade_id != effective_grade_id:
                 raise HTTPException(status_code=400, detail="Subject group grade mismatch")
         
-        # Load prediction weights from database
-        prediction_settings = db.query(PredictionSettings).filter(
-            PredictionSettings.is_active == 1
-        ).first()
-        
-        weights = {
-            'previous_class': 0.3,
-            'teacher': 0.2,
-            'quarters': 0.5
-        }
-        if prediction_settings and prediction_settings.weights:
-            weights = prediction_settings.weights
+        weights = load_prediction_weights_from_db(db)
         
         # Load Excel column mappings from database
         column_mappings = db.query(ExcelColumnMapping).filter(
@@ -2381,38 +2375,15 @@ async def upload_excel_grades(
             try:
                 student_name = student_data["student_name"]
                 actual_scores = student_data["actual_scores"]
-                predicted_scores = student_data["predicted_scores"]
                 previous_class_score = student_data.get("previous_class_score")
-                
-                # Calculate danger level correctly
-                # Compare only completed quarters (where actual score is not None/0)
-                
-                actual_completed = [s for s in actual_scores if s is not None and s > 0]
-                num_completed = len(actual_completed)
-                
-                danger_level = 0 # Default to Normal
-                percentage_difference = 0.0
+                teacher_percent = student_data.get("teacher_percent")
 
-                if num_completed > 0 and len(predicted_scores) >= num_completed:
-                    predicted_for_completed = predicted_scores[:num_completed]
-                    
-                    avg_actual = sum(actual_completed) / num_completed
-                    avg_predicted = sum(predicted_for_completed) / num_completed
-                    
-                    delta = avg_actual - avg_predicted
-                    
-                    if delta < -15:
-                        danger_level = 3  # Критический
-                    elif delta < -10:
-                        danger_level = 2  # Повышенный
-                    elif delta < -5:
-                        danger_level = 1  # Умеренный
-                    else:
-                        danger_level = 0 # Нормальный
-
-                    # Also calculate a delta percentage for reference if needed
-                    if avg_predicted > 0:
-                        percentage_difference = (delta / avg_predicted) * 100
+                predicted_scores, danger_level, percentage_difference = recalculate_predicted_and_danger_from_actual(
+                    actual_scores,
+                    previous_class_score,
+                    teacher_percent,
+                    weights,
+                )
 
                 danger_distribution[danger_level] += 1
                 
@@ -2471,6 +2442,7 @@ async def upload_excel_grades(
                     db_score.teacher_name = teacher_name
                     db_score.subject_name = subject.name
                     db_score.previous_class_score = previous_class_score
+                    db_score.teacher_percent = teacher_percent
                     db_score.actual_scores = actual_scores
                     db_score.predicted_scores = predicted_scores
                     db_score.danger_level = danger_level
@@ -2486,6 +2458,7 @@ async def upload_excel_grades(
                         subject_name=subject.name,
                         subject_id=subject_id,
                         previous_class_score=previous_class_score,
+                        teacher_percent=teacher_percent,
                         actual_scores=actual_scores,
                         predicted_scores=predicted_scores,
                         danger_level=danger_level,

@@ -89,6 +89,7 @@ class ScoresInDB(Base):
     subject_name = Column(String(100), nullable=False, index=True)
     subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=True, index=True)  # New relation to subjects
     previous_class_score = Column(Float, nullable=True)
+    teacher_percent = Column(Float, nullable=True)
     actual_scores = Column(JSONB, nullable=True)  # Changed from JSON to JSONB, removed index
     predicted_scores = Column(JSONB, nullable=True)  # Changed from JSON to JSONB, removed index
     danger_level = Column(Integer, nullable=False, index=True)
@@ -138,7 +139,7 @@ class PredictionSettings(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), unique=True, nullable=False, index=True) # e.g., "default_weights"
-    weights = Column(JSONB, nullable=False) # e.g., {"previous_class": 0.3, "teacher": 0.2, "quarters": 0.5}
+    weights = Column(JSONB, nullable=False) # e.g., {"previous_class": 0.7, "teacher": 0.3}
     is_active = Column(Integer, default=1, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -281,6 +282,8 @@ class CreateScore(BaseModel):
 class UpdateScore(BaseModel):
     teacher_name: Optional[str] = None
     subject_name: Optional[str] = None
+    previous_class_score: Optional[float] = None
+    teacher_percent: Optional[float] = None
     actual_scores: Optional[Dict[str, Any]] = None
     predicted_scores: Optional[Dict[str, Any]] = None
     danger_level: Optional[int] = None

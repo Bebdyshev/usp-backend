@@ -42,6 +42,34 @@ def validate_percentage(value: Any) -> Optional[float]:
     except (ValueError, TypeError):
         return None
 
+def calculate_student_level(
+    previous_class_score: Optional[float],
+    teacher_percent: Optional[float],
+    weights: Optional[Dict[str, float]] = None,
+) -> float:
+    """
+    Уровень ученика = w_prev × оценка за прошлый год + w_teacher × прогноз учителя.
+    По умолчанию: 0.7 и 0.3.
+    """
+    w = weights or {"previous_class": 0.7, "teacher": 0.3}
+    w_prev = w.get("previous_class", 0.7)
+    w_teacher = w.get("teacher", 0.3)
+
+    has_prev = previous_class_score is not None
+    has_teacher = teacher_percent is not None
+
+    if has_prev and has_teacher:
+        level = w_prev * previous_class_score + w_teacher * teacher_percent
+    elif has_prev:
+        level = previous_class_score
+    elif has_teacher:
+        level = teacher_percent
+    else:
+        level = 0.0
+
+    return round(level, 1)
+
+
 def calculate_predicted_scores_by_quarter(
     previous_class_score: Optional[float],
     current_quarters: List[Optional[float]],
@@ -49,72 +77,11 @@ def calculate_predicted_scores_by_quarter(
     weights: Dict[str, float] = None
 ) -> List[float]:
     """
-    Calculate predicted scores for each quarter based on available data
-    
-    Formula for each quarter Qn:
-    P(Qn) = (w_prev * prev_class_score) + (w_teacher * teacher_score) + (w_quarters * avg(Q1...Qn-1))
-    
-    Args:
-        previous_class_score: Score from previous class (previous year)
-        current_quarters: List of 4 quarter scores (can contain None for future quarters)
-        teacher_percent: Teacher's assessment percentage
-        weights: Dictionary with weights for 'previous_class', 'teacher', 'quarters'
-    
-    Returns:
-        List of 4 predicted scores, one for each quarter
+    Прогноз по каждой четверти = уровень ученика (одинаковый для Q1–Q4).
+    Разница по четверти: фактическая оценка − уровень ученика.
     """
-    if weights is None:
-        weights = {
-            'previous_class': 0.3,
-            'teacher': 0.2,
-            'quarters': 0.5
-        }
-    
-    w_prev = weights.get('previous_class', 0.3)
-    w_teacher = weights.get('teacher', 0.2)
-    w_quarters = weights.get('quarters', 0.5)
-
-    predicted_scores = [0.0] * 4
-
-    # --- P(Q1) ---
-    # For Q1, prediction is based on previous class and teacher scores.
-    # We need to normalize the weights as there are no previous quarters.
-    base_prediction_components = []
-    total_base_weight = 0
-    
-    if previous_class_score is not None:
-        base_prediction_components.append(w_prev * previous_class_score)
-        total_base_weight += w_prev
-        
-    if teacher_percent is not None:
-        base_prediction_components.append(w_teacher * teacher_percent)
-        total_base_weight += w_teacher
-
-    if total_base_weight > 0:
-        normalized_prediction = sum(base_prediction_components) / total_base_weight
-        predicted_scores[0] = round(normalized_prediction, 1)
-    else:
-        predicted_scores[0] = 0.0
-
-    # --- P(Q2), P(Q3), P(Q4) ---
-    for i in range(1, 4):
-        prev_quarters = [q for q in current_quarters[:i] if q is not None and q > 0]
-        
-        if not prev_quarters:
-            # If no previous quarters, prediction is the same as for Q1
-            predicted_scores[i] = predicted_scores[0]
-            continue
-            
-        avg_prev_quarters = sum(prev_quarters) / len(prev_quarters)
-        
-        prediction = (
-            (w_prev * previous_class_score if previous_class_score is not None else 0) +
-            (w_teacher * teacher_percent if teacher_percent is not None else 0) +
-            (w_quarters * avg_prev_quarters)
-        )
-        predicted_scores[i] = round(prediction, 1)
-
-    return predicted_scores
+    level = calculate_student_level(previous_class_score, teacher_percent, weights)
+    return [level, level, level, level]
 
 
 def load_prediction_weights_from_db(db: Any) -> Dict[str, float]:
@@ -125,9 +92,8 @@ def load_prediction_weights_from_db(db: Any) -> Dict[str, float]:
         PredictionSettings.is_active == 1
     ).first()
     weights: Dict[str, float] = {
-        "previous_class": 0.3,
-        "teacher": 0.2,
-        "quarters": 0.5,
+        "previous_class": 0.7,
+        "teacher": 0.3,
     }
     if prediction_settings and prediction_settings.weights:
         weights = prediction_settings.weights
@@ -161,16 +127,11 @@ def recalculate_predicted_and_danger_from_actual(
             quarters_opt.append(fv if fv > 0 else None)
 
     w = weights or {
-        "previous_class": 0.3,
-        "teacher": 0.2,
-        "quarters": 0.5,
+        "previous_class": 0.7,
+        "teacher": 0.3,
     }
-    predicted = calculate_predicted_scores_by_quarter(
-        previous_class_score,
-        quarters_opt,
-        teacher_percent,
-        w,
-    )
+    student_level = calculate_student_level(previous_class_score, teacher_percent, w)
+    predicted = [student_level, student_level, student_level, student_level]
 
     raw = []
     for x in raw_in:
@@ -187,11 +148,9 @@ def recalculate_predicted_and_danger_from_actual(
     danger_level = 0
     percentage_difference = 0.0
 
-    if num_completed > 0 and len(predicted) >= num_completed:
-        predicted_for_completed = predicted[:num_completed]
-        avg_actual = sum(actual_completed) / num_completed
-        avg_predicted = sum(predicted_for_completed) / num_completed
-        delta = avg_actual - avg_predicted
+    if num_completed > 0 and student_level > 0:
+        quarter_deltas = [actual - student_level for actual in actual_completed]
+        delta = sum(quarter_deltas) / num_completed
         if delta < -15:
             danger_level = 3
         elif delta < -10:
@@ -200,8 +159,8 @@ def recalculate_predicted_and_danger_from_actual(
             danger_level = 1
         else:
             danger_level = 0
-        if avg_predicted > 0:
-            percentage_difference = (delta / avg_predicted) * 100
+        # Разница в процентных пунктах: факт − уровень (напр. 65.2 − 81 = −15.8)
+        percentage_difference = delta
 
     return predicted, danger_level, round(percentage_difference, 1)
 
@@ -242,9 +201,8 @@ def parse_excel_grades(
     
     if weights is None:
         weights = {
-            'previous_class': 0.3,
-            'teacher': 0.2,
-            'quarters': 0.5
+            'previous_class': 0.7,
+            'teacher': 0.3,
         }
     
     try:

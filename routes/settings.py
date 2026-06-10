@@ -258,9 +258,8 @@ async def get_prediction_weights(
     if not settings:
         # Create default settings if none exist
         default_weights = {
-            'previous_class': 0.3,
-            'teacher': 0.2,
-            'quarters': 0.5
+            'previous_class': 0.7,
+            'teacher': 0.3,
         }
         default_settings = PredictionSettings(
             name="default_weights",
@@ -296,8 +295,7 @@ async def update_prediction_weights(
             detail=f"Weights must sum to 1.0, but they sum to {total}"
         )
     
-    # Validate required weight keys
-    required_keys = {'previous_class', 'teacher', 'quarters'}
+    required_keys = {'previous_class', 'teacher'}
     if not required_keys.issubset(weights.keys()):
         raise HTTPException(
             status_code=400,

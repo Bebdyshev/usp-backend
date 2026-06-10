@@ -13,7 +13,7 @@ from role_utils import (
 from typing import List, Optional
 
 router = APIRouter()
-GROUP_NAME_PATTERN = re.compile(r"^Group #\d+$")
+GROUP_NAME_PATTERN = re.compile(r"^Группа \d+$")
 
 
 def parallel_int_from_grade_row(grade: Optional[GradeInDB]) -> Optional[int]:
@@ -26,7 +26,7 @@ def parallel_int_from_grade_row(grade: Optional[GradeInDB]) -> Optional[int]:
 def _grade_allows_subject_groups(grade: GradeInDB) -> bool:
     # Grade-anchored subject groups are allowed for parallels 7-12.
     # Use cases:
-    #   - 7-10: within-class subdivisions for a specific subject (e.g. Kazakh Group #1 / #2)
+    #   - 7-10: within-class subdivisions for a specific subject (e.g. Kazakh Группа 1 / Группа 2)
     #   - 11-12: anchored elective groups inside a single class
     p = parallel_int_from_grade_row(grade)
     return p is not None and 7 <= p <= 12
@@ -67,7 +67,7 @@ def _validate_group_name(name: str) -> str:
     if not GROUP_NAME_PATTERN.match(normalized):
         raise HTTPException(
             status_code=400,
-            detail="Group name must match format: Group #<number> (e.g., Group #1)",
+            detail="Название группы должно быть в формате: Группа <номер> (например, Группа 1)",
         )
     return normalized
 
