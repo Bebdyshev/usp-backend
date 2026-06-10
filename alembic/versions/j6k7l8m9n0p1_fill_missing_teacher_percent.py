@@ -6,7 +6,6 @@ Create Date: 2026-06-10 13:40:00.000000
 
 """
 from alembic import op
-import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
@@ -33,17 +32,24 @@ def upgrade() -> None:
           AND previous_class_score > 0
     """)
     
-    # Step 2: For records still without teacher_percent, try to infer from actual scores average
+    # Step 2: For records still without teacher_percent, infer from actual_scores JSON/JSONB array
     op.execute("""
         UPDATE scores
         SET teacher_percent = (
-            SELECT AVG(val)
-            FROM unnest(actual_scores) AS val
-            WHERE val > 0
+            SELECT AVG(val::float)
+            FROM jsonb_array_elements_text(scores.actual_scores::jsonb) AS val
+            WHERE val ~ '^-?[0-9]+(\\.[0-9]+)?$'
+              AND (val::float) > 0
         )
-        WHERE teacher_percent IS NULL 
+        WHERE teacher_percent IS NULL
           AND actual_scores IS NOT NULL
-          AND jsonb_array_length(actual_scores::jsonb) > 0
+          AND jsonb_typeof(actual_scores::jsonb) = 'array'
+          AND EXISTS (
+              SELECT 1
+              FROM jsonb_array_elements_text(scores.actual_scores::jsonb) AS val
+              WHERE val ~ '^-?[0-9]+(\\.[0-9]+)?$'
+                AND (val::float) > 0
+          )
     """)
     
     print("✅ Filled missing teacher_percent values")
