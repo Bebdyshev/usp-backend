@@ -25,7 +25,7 @@ from services.excel_parser import (
     load_prediction_weights_from_db,
     recalculate_predicted_and_danger_from_actual,
 )
-from typing import Optional, List, Set
+from typing import Optional, List, Set, Dict
 import re
 
 router = APIRouter()
@@ -52,6 +52,76 @@ def _sync_score_prediction_with_actual(score: ScoresInDB, db: Session) -> None:
     score.predicted_scores = pred
     score.danger_level = dlevel
     score.delta_percentage = dpct
+
+
+def _as_quarter_scores(raw_scores: object) -> List[float]:
+    values = list(raw_scores) if isinstance(raw_scores, list) else []
+    values = values[:4]
+    while len(values) < 4:
+        values.append(0.0)
+    out: List[float] = []
+    for value in values:
+        try:
+            out.append(float(value) if value is not None else 0.0)
+        except (TypeError, ValueError):
+            out.append(0.0)
+    return out
+
+
+def _merge_scores_for_display(score_rows: List[ScoresInDB], weights: Dict[str, float]) -> Optional[dict]:
+    if not score_rows:
+        return None
+
+    ordered_rows = sorted(
+        score_rows,
+        key=lambda row: (
+            row.semester or 0,
+            row.updated_at or row.created_at,
+            row.id or 0,
+        ),
+    )
+    latest_row = ordered_rows[-1]
+
+    merged_actual = [0.0, 0.0, 0.0, 0.0]
+    previous_class_score = None
+    teacher_percent = None
+    teacher_name = None
+
+    for row in ordered_rows:
+        row_actual = _as_quarter_scores(row.actual_scores)
+        for idx, val in enumerate(row_actual):
+            if val > 0:
+                merged_actual[idx] = val
+
+        if row.previous_class_score is not None:
+            previous_class_score = row.previous_class_score
+        if row.teacher_percent is not None:
+            teacher_percent = row.teacher_percent
+        if row.teacher_name:
+            teacher_name = row.teacher_name
+
+    predicted_scores, danger_level, delta_percentage = recalculate_predicted_and_danger_from_actual(
+        merged_actual,
+        previous_class_score,
+        teacher_percent,
+        weights,
+    )
+
+    return {
+        "id": latest_row.id,
+        "teacher_name": teacher_name or latest_row.teacher_name,
+        "subject_name": latest_row.subject_name,
+        "actual_scores": merged_actual,
+        "predicted_scores": predicted_scores,
+        "danger_level": danger_level,
+        "delta_percentage": round(delta_percentage, 1),
+        "semester": latest_row.semester,
+        "academic_year": latest_row.academic_year,
+        "student_id": latest_row.student_id,
+        "grade_id": latest_row.grade_id,
+        "previous_class_score": previous_class_score,
+        "teacher_percent": teacher_percent,
+    }
 
 
 def _extract_grade_parallel_from_class_text(class_text: str) -> tuple[Optional[str], Optional[str]]:
@@ -1715,28 +1785,38 @@ async def get_student_scores(
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
         
-    scores = db.query(ScoresInDB).filter(ScoresInDB.student_id == student_id).all()
-    
+    current_year = get_current_academic_year(db)
+    rows = db.query(ScoresInDB).filter(
+        ScoresInDB.student_id == student_id,
+        ScoresInDB.academic_year == current_year,
+    ).all()
+
+    grouped: Dict[tuple[int, Optional[int]], List[ScoresInDB]] = {}
+    for row in rows:
+        key = (row.subject_id, row.subject_group_id)
+        grouped.setdefault(key, []).append(row)
+
+    weights = load_prediction_weights_from_db(db)
     result = []
-    for score in scores:
-        result.append({
-            "id": score.id,
-            "teacher_name": score.teacher_name,
-            "subject_name": score.subject_name,
-            "actual_scores": score.actual_scores,
-            "predicted_scores": score.predicted_scores,
-            "danger_level": score.danger_level,
-            "delta_percentage": score.delta_percentage,
-            "semester": score.semester,
-            "academic_year": score.academic_year,
-            "created_at": score.created_at,
-            "updated_at": score.updated_at,
-            "student_id": score.student_id,
-            "grade_id": score.grade_id,
-            "previous_class_score": score.previous_class_score,
-            "teacher_percent": score.teacher_percent,
+    for grouped_rows in grouped.values():
+        merged = _merge_scores_for_display(grouped_rows, weights)
+        if not merged:
+            continue
+        latest_row = sorted(
+            grouped_rows,
+            key=lambda row: (
+                row.semester or 0,
+                row.updated_at or row.created_at,
+                row.id or 0,
+            ),
+        )[-1]
+        merged.update({
+            "created_at": latest_row.created_at,
+            "updated_at": latest_row.updated_at,
         })
-        
+        result.append(merged)
+
+    result.sort(key=lambda item: (item.get("subject_name") or "", item.get("semester") or 0))
     return result
 
 @router.put("/scores/{score_id}", status_code=status.HTTP_200_OK)
@@ -2157,6 +2237,7 @@ async def get_teacher_students(
     # Get subject info
     subject = db.query(SubjectInDB).filter(SubjectInDB.id == subject_id).first()
     
+    weights = load_prediction_weights_from_db(db)
     result = []
     for student in students:
         # Оценка за текущий учебный год (история хранится в других строках)
@@ -2169,7 +2250,12 @@ async def get_teacher_students(
             score_query = score_query.filter(ScoresInDB.subject_group_id == subject_group_id)
         else:
             score_query = score_query.filter(ScoresInDB.subject_group_id.is_(None))
-        score = score_query.first()
+        score_rows = score_query.order_by(
+            ScoresInDB.semester.asc(),
+            ScoresInDB.updated_at.asc(),
+            ScoresInDB.id.asc(),
+        ).all()
+        merged_score = _merge_scores_for_display(score_rows, weights)
         
         grade = db.query(GradeInDB).filter(GradeInDB.id == student.grade_id).first()
         
@@ -2179,10 +2265,12 @@ async def get_teacher_students(
             "grade_id": student.grade_id,
             "grade_name": grade.grade if grade else None,
             "subgroup_id": student.subgroup_id,
-            "score_id": score.id if score else None,
-            "actual_scores": score.actual_scores if score else None,
-            "predicted_scores": score.predicted_scores if score else None,
-            "danger_level": score.danger_level if score else None,
+            "score_id": merged_score["id"] if merged_score else None,
+            "actual_scores": merged_score["actual_scores"] if merged_score else None,
+            "predicted_scores": merged_score["predicted_scores"] if merged_score else None,
+            "danger_level": merged_score["danger_level"] if merged_score else None,
+            "teacher_percent": merged_score["teacher_percent"] if merged_score else None,
+            "previous_class_score": merged_score["previous_class_score"] if merged_score else None,
             "subject_name": subject.name if subject else None
         })
     
@@ -2501,5 +2589,154 @@ async def upload_excel_grades(
         raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An error occurred during upload: {str(e)}")
+
+
+@router.post("/admin/recalculate-predictions")
+async def recalculate_all_predictions(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Recalculate predictions for all scores (Admin only)"""
+    user_data = verify_access_token(token)
+    if not user_data or user_data.get("type") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        weights = load_prediction_weights_from_db(db)
+        scores = db.query(ScoresInDB).all()
+        updated_count = 0
+        
+        for score in scores:
+            if score.actual_scores:
+                _sync_score_prediction_with_actual(score, db)
+                updated_count += 1
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "message": f"Recalculated predictions for {updated_count} score records",
+            "updated_count": updated_count
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error recalculating predictions: {str(e)}")
+
+
+@router.get("/admin/invalid-students")
+async def get_invalid_students(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Get list of students with invalid names (Admin only)"""
+    user_data = verify_access_token(token)
+    if not user_data or user_data.get("type") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    # Query for students with potentially invalid names
+    invalid_patterns = [
+        ("Only digits", r'^[0-9]+$'),
+        ("'No' pattern", r'^no\.?$'),
+        ("'N/A' pattern", r'^n/a$'),
+        ("Only special chars", r'^[-_]+$'),
+        ("Unnamed", r'^unnamed'),
+        ("Hash pattern", r'^#[0-9]+'),
+        ("Too short", None),  # Special case
+        ("No letters", None),  # Special case
+    ]
+    
+    invalid_students = []
+    
+    for reason, pattern in invalid_patterns:
+        if pattern:
+            students = db.query(StudentInDB).filter(
+                func.lower(StudentInDB.name).op('~')(pattern)
+            ).all()
+        elif reason == "Too short":
+            students = db.query(StudentInDB).filter(
+                func.length(func.trim(StudentInDB.name)) < 2
+            ).all()
+        elif reason == "No letters":
+            students = db.query(StudentInDB).filter(
+                ~StudentInDB.name.op('~')(r'[а-яА-ЯёЁa-zA-Z]')
+            ).all()
+        else:
+            students = []
+        
+        for student in students:
+            grade = db.query(GradeInDB).filter(GradeInDB.id == student.grade_id).first()
+            invalid_students.append({
+                "id": student.id,
+                "name": student.name,
+                "email": student.email,
+                "grade": f"{grade.grade} {grade.parallel}" if grade else "Unknown",
+                "grade_id": student.grade_id,
+                "reason": reason,
+                "is_active": student.is_active
+            })
+    
+    # Remove duplicates
+    seen = set()
+    unique_students = []
+    for student in invalid_students:
+        if student["id"] not in seen:
+            seen.add(student["id"])
+            unique_students.append(student)
+    
+    return {
+        "count": len(unique_students),
+        "students": unique_students
+    }
+
+
+@router.delete("/admin/invalid-students")
+async def delete_invalid_students(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """Delete all students with invalid names (Admin only)"""
+    user_data = verify_access_token(token)
+    if not user_data or user_data.get("type") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        # Count before deletion
+        invalid_count = db.query(StudentInDB).filter(
+            or_(
+                StudentInDB.name.op('~')(r'^[0-9]+$'),
+                func.lower(StudentInDB.name).op('~')(r'^no\.?$'),
+                func.lower(StudentInDB.name).op('~')(r'^n/a$'),
+                StudentInDB.name.op('~')(r'^[-_]+$'),
+                func.lower(StudentInDB.name).like('unnamed%'),
+                StudentInDB.name.op('~')(r'^#[0-9]+'),
+                func.length(func.trim(StudentInDB.name)) < 2,
+                ~StudentInDB.name.op('~')(r'[а-яА-ЯёЁa-zA-Z]')
+            )
+        ).count()
+        
+        # Delete invalid students
+        db.query(StudentInDB).filter(
+            or_(
+                StudentInDB.name.op('~')(r'^[0-9]+$'),
+                func.lower(StudentInDB.name).op('~')(r'^no\.?$'),
+                func.lower(StudentInDB.name).op('~')(r'^n/a$'),
+                StudentInDB.name.op('~')(r'^[-_]+$'),
+                func.lower(StudentInDB.name).like('unnamed%'),
+                StudentInDB.name.op('~')(r'^#[0-9]+'),
+                func.length(func.trim(StudentInDB.name)) < 2,
+                ~StudentInDB.name.op('~')(r'[а-яА-ЯёЁa-zA-Z]')
+            )
+        ).delete(synchronize_session=False)
+        
+        db.commit()
+        
+        return {
+            "success": True,
+            "message": f"Deleted {invalid_count} invalid student records",
+            "deleted_count": invalid_count
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error deleting invalid students: {str(e)}")
 
 

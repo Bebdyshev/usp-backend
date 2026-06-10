@@ -7,12 +7,37 @@ from typing import Dict, List, Optional, Tuple, Any, Union
 import unicodedata
 
 def normalize_name(name: str) -> str:
-    """Normalize student name for consistent storage"""
+    """Normalize student name for consistent storage with validation"""
     if not name or pd.isna(name):
         return ""
     
     # Convert to string and strip whitespace
     name = str(name).strip()
+    
+    # Filter out invalid names (numbers, "No", "N/A", etc.)
+    invalid_patterns = [
+        r'^\d+$',  # Only digits
+        r'^no\.?$',  # "No" or "No."
+        r'^n/a$',  # "N/A"
+        r'^-+$',  # Only dashes
+        r'^_+$',  # Only underscores
+        r'^\s*$',  # Only whitespace
+        r'^#\d+$',  # "#123" pattern
+        r'^unnamed',  # Excel unnamed columns
+    ]
+    
+    name_lower = name.lower()
+    for pattern in invalid_patterns:
+        if re.match(pattern, name_lower):
+            return ""
+    
+    # Must contain at least one letter (Cyrillic or Latin)
+    if not re.search(r'[а-яА-ЯёЁa-zA-Z]', name):
+        return ""
+    
+    # Name must be at least 2 characters
+    if len(name) < 2:
+        return ""
     
     # Unicode normalization
     name = unicodedata.normalize('NFKC', name)
