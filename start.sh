@@ -19,6 +19,12 @@ if [ -z "$DATABASE_URL" ]; then
     export $(grep -v '^#' .env | xargs)
     echo "Loaded DATABASE_URL from .env"
   fi
+  
+  # Fallback to hardcoded DATABASE_URL (NOT RECOMMENDED FOR PRODUCTION)
+  if [ -z "$DATABASE_URL" ]; then
+    echo "WARNING: Using fallback DATABASE_URL from start.sh"
+    export DATABASE_URL="postgresql://postgres:2yjGTYV0D5spxmN0tekamo58zzP8SAACXdP285zvMIqYCHsXtMNeflhOU3e36Fwz@v888k0kkccwwc4wkso4gsscw:5432/postgres"
+  fi
 fi
 
 # Use run_migration.py to ensure proper environment variable loading
