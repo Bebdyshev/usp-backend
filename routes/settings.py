@@ -286,20 +286,29 @@ async def update_prediction_weights(
     if user_data.get("type") != "admin":
         raise HTTPException(status_code=403, detail="Only admins can update prediction weights")
     
-    # Validate weights sum to approximately 1.0
+    # Validate keys: only current formula keys are allowed
     weights = update_data.weights
+    required_keys = {'previous_class', 'teacher'}
+    provided_keys = set(weights.keys())
+    extra_keys = provided_keys - required_keys
+    if extra_keys:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unexpected weight keys: {extra_keys}. Allowed keys: {required_keys}"
+        )
+
+    if not required_keys.issubset(provided_keys):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing required weight keys. Required: {required_keys}, provided: {provided_keys}"
+        )
+
+    # Validate weights sum to approximately 1.0
     total = sum(weights.values())
     if abs(total - 1.0) > 0.01:  # Allow small floating point errors
         raise HTTPException(
             status_code=400, 
             detail=f"Weights must sum to 1.0, but they sum to {total}"
-        )
-    
-    required_keys = {'previous_class', 'teacher'}
-    if not required_keys.issubset(weights.keys()):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Missing required weight keys. Required: {required_keys}, provided: {set(weights.keys())}"
         )
     
     # Get or create prediction settings

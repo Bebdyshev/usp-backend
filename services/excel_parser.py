@@ -77,14 +77,20 @@ def calculate_student_level(
     По умолчанию: 0.7 и 0.3.
     """
     w = weights or {"previous_class": 0.7, "teacher": 0.3}
-    w_prev = w.get("previous_class", 0.7)
-    w_teacher = w.get("teacher", 0.3)
+    w_prev = float(w.get("previous_class", 0.7) or 0.0)
+    w_teacher = float(w.get("teacher", 0.3) or 0.0)
+    effective_weight_sum = w_prev + w_teacher
 
     has_prev = previous_class_score is not None
     has_teacher = teacher_percent is not None
 
     if has_prev and has_teacher:
-        level = w_prev * previous_class_score + w_teacher * teacher_percent
+        # Normalize by effective two weights to tolerate legacy payloads
+        # that may still include unrelated keys (e.g. "quarters").
+        if effective_weight_sum > 0:
+            level = (w_prev * previous_class_score + w_teacher * teacher_percent) / effective_weight_sum
+        else:
+            level = 0.7 * previous_class_score + 0.3 * teacher_percent
     elif has_prev:
         level = previous_class_score
     elif has_teacher:
@@ -116,13 +122,25 @@ def load_prediction_weights_from_db(db: Any) -> Dict[str, float]:
     prediction_settings = db.query(PredictionSettings).filter(
         PredictionSettings.is_active == 1
     ).first()
-    weights: Dict[str, float] = {
+    default_weights: Dict[str, float] = {
         "previous_class": 0.7,
         "teacher": 0.3,
     }
-    if prediction_settings and prediction_settings.weights:
-        weights = prediction_settings.weights
-    return weights
+    if not prediction_settings or not prediction_settings.weights:
+        return default_weights
+
+    raw = prediction_settings.weights
+    w_prev = float(raw.get("previous_class", default_weights["previous_class"]) or 0.0)
+    w_teacher = float(raw.get("teacher", default_weights["teacher"]) or 0.0)
+    total = w_prev + w_teacher
+
+    if total <= 0:
+        return default_weights
+
+    return {
+        "previous_class": w_prev / total,
+        "teacher": w_teacher / total,
+    }
 
 
 def recalculate_predicted_and_danger_from_actual(
